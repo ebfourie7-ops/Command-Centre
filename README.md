@@ -27,6 +27,10 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 - Command Terminal can start `codex login` to link your ChatGPT/OpenAI account and check login status
 - Command Terminal shows Codex usage as tracked tokens used against a local limit you set
 - Command Intel provides query-once OSINT launchers for usernames, email addresses, domains, IPs, phones, people, and companies, with selected-provider launching and a locally saved investigation workspace
+- Command Intel now includes SQLite-backed cases, hashed evidence imports, browser screenshots, integrity verification, HTML reports, structured entities and relationships, and a visual investigation graph
+- Its research browser supports multiple tabs, ad/tracker blocking, standard and JavaScript-disabled privacy modes, external-browser handoff, and direct capture into the active case
+- Tool and workflow support detects common local OSINT utilities, launches authorized jobs in a terminal, and provides a repeatable domain-research workflow
+- Command AI provides deterministic case summaries and evidence-grounded local analysis through Ollama when a local model is available
 - Deployment Centre is a profile-driven mission launcher with GUI add/edit/duplicate/remove controls, using JSON templates from `deployments/default_deployments.json` and custom profiles from `~/.config/command-centre/deployment_profiles.json`
 - Offline Knowledge has a single ZIM library location button, a ZIM file list, and an in-app reader
 
@@ -41,6 +45,17 @@ The desktop launcher is:
 
 ```text
 Command Centre.desktop
+```
+
+## Versions
+
+- `v0.1` is the preserved baseline before the integrated Command Intel case platform.
+- Current development is on the `main` branch.
+
+Command Intel stores its case database and copied evidence under:
+
+```text
+~/.local/share/command-centre/intel/
 ```
 
 ## Notes

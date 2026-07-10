@@ -49,6 +49,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from command_intel import AdvancedCommandIntelPage
+
 
 STATE_FILE = Path.home() / ".local/state/telemetry/telemetry.json"
 TELEMETRY_URL = "http://127.0.0.1:9090/telemetry"
@@ -3701,7 +3703,7 @@ class MainWindow(QMainWindow):
             elif module_id == "command_code":
                 page = CommandCodePage(self)
             elif module_id == "intel":
-                page = CommandIntelPage(self)
+                page = AdvancedCommandIntelPage(self, INTEL_CATEGORIES, INTEL_PROVIDERS)
             elif module_id == "deployment":
                 page = DeploymentPage(self)
             else:
