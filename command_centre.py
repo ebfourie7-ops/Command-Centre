@@ -65,12 +65,14 @@ LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
 SPLASH_FILE = Path.home() / "Desktop/splash screen.png"
 INVENTORY_DIR = APP_DIR / "inventory"
 DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
+COMMAND_WIDGET_DIR = Path.home() / "Desktop/Code/Command-widget"
 
 
 MODULES = [
     ("dashboard", "SY", "System Dashboard"),
     ("control", "SC", "System Control"),
     ("tools", "TL", "Tool Library"),
+    ("command_apps", "CA", "Command Apps"),
     ("command_code", "CT", "Command Terminal"),
     ("intel", "CI", "Command Intel"),
     ("offline", "OK", "Offline Knowledge"),
@@ -3428,6 +3430,163 @@ class DeploymentPage(QWidget):
         return captured[:20]
 
 
+class CommandAppsPage(QWidget):
+    def __init__(self, parent_window):
+        super().__init__()
+        self.parent_window = parent_window
+        self.widget_status = QLabel("Checking…")
+        self.widget_status.setObjectName("muted")
+        self.widget_install = QPushButton("Install")
+        self.widget_install.setObjectName("primaryButton")
+        self.widget_install.clicked.connect(self.install_command_widget)
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setObjectName("textPanel")
+        self.output.setMaximumHeight(150)
+
+        hero = QFrame()
+        hero.setObjectName("hero")
+        hero_layout = QVBoxLayout(hero)
+        title = QLabel("COMMAND APPS")
+        title.setObjectName("heroTitle")
+        subtitle = QLabel("OFFICIAL APPLICATIONS FOR COMMANDOS")
+        subtitle.setObjectName("heroSubtitle")
+        note = QLabel("Install and manage CommandOS applications from one trusted local catalogue. Every installation is previewed and confirmed first.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        hero_layout.addWidget(title)
+        hero_layout.addWidget(subtitle)
+        hero_layout.addWidget(note)
+
+        cards = QGridLayout()
+        cards.addWidget(self.command_widget_card(), 0, 0)
+        cards.addWidget(self.installer_card(), 0, 1)
+        cards.setColumnStretch(0, 1)
+        cards.setColumnStretch(1, 1)
+
+        result, result_layout = self.panel("Installation Output")
+        result_layout.addWidget(self.output)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.addWidget(hero)
+        layout.addLayout(cards)
+        layout.addWidget(result)
+        layout.addStretch()
+        self.refresh()
+
+    def panel(self, title):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        heading = QLabel(title)
+        heading.setObjectName("panelTitle")
+        layout.addWidget(heading)
+        return frame, layout
+
+    def command_widget_card(self):
+        frame, layout = self.panel("CW   Command Widget")
+        description = QLabel(
+            "A KDE Plasma 6 system telemetry widget for CommandOS. It displays power mode, CPU, memory, GPU, storage, fans, network, VPN, and battery status."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        features = QLabel("INCLUDES\n• Plasma desktop widget\n• Local telemetry collector\n• Local HTTP telemetry service\n• Automatic user-service startup")
+        features.setObjectName("muted")
+        features.setWordWrap(True)
+        actions = QHBoxLayout()
+        open_project = QPushButton("Open Project")
+        open_project.clicked.connect(self.open_widget_project)
+        actions.addWidget(self.widget_install)
+        actions.addWidget(open_project)
+        actions.addStretch()
+        layout.addWidget(description)
+        layout.addWidget(features)
+        layout.addStretch()
+        layout.addWidget(self.widget_status)
+        layout.addLayout(actions)
+        return frame
+
+    def installer_card(self):
+        frame, layout = self.panel("CI   CommandOS Installer")
+        description = QLabel(
+            "The planned graphical installer for deploying CommandOS to physical computers and virtual machines."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        features = QLabel("PLANNED\n• Guided disk setup\n• User and locale configuration\n• CommandOS profile selection\n• Offline installation support")
+        features.setObjectName("muted")
+        placeholder = QLabel("COMING SOON · PLACEHOLDER")
+        placeholder.setObjectName("muted")
+        button = QPushButton("Not available yet")
+        button.setDisabled(True)
+        layout.addWidget(description)
+        layout.addWidget(features)
+        layout.addStretch()
+        layout.addWidget(placeholder)
+        layout.addWidget(button)
+        return frame
+
+    def widget_installed(self):
+        widget = Path.home() / ".local/share/plasma/plasmoids/telemetrywidget/metadata.json"
+        daemon = Path.home() / ".local/bin/telemetry-daemon"
+        http_daemon = Path.home() / ".local/bin/telemetry-http-daemon"
+        return widget.exists() and daemon.exists() and http_daemon.exists()
+
+    def refresh(self):
+        installed = self.widget_installed()
+        source_ready = (COMMAND_WIDGET_DIR / "install.sh").exists()
+        if installed:
+            self.widget_status.setText("● INSTALLED · Command Centre telemetry integration active")
+            self.widget_install.setText("Reinstall / Update")
+        elif source_ready:
+            self.widget_status.setText("○ AVAILABLE · Local verified project found")
+            self.widget_install.setText("Install")
+        else:
+            self.widget_status.setText("SOURCE NOT FOUND · Expected ~/Desktop/Code/Command-widget")
+            self.widget_install.setText("Install unavailable")
+        self.widget_install.setEnabled(source_ready)
+
+    def install_command_widget(self):
+        installer = COMMAND_WIDGET_DIR / "install.sh"
+        if not installer.exists():
+            QMessageBox.warning(self, "Command Widget", f"Installer not found:\n{installer}")
+            self.refresh()
+            return
+        action = "update" if self.widget_installed() else "install"
+        if not confirm(
+            self,
+            f"{action.title()} Command Widget",
+            f"Run the trusted local installer?\n\n/bin/bash {installer}\n\nThis copies files into your user profile and enables the two telemetry user services.",
+        ):
+            return
+        self.widget_install.setEnabled(False)
+        self.output.setPlainText(f"Running {installer}…")
+        QApplication.processEvents()
+        result = subprocess.run(
+            ["/bin/bash", str(installer)],
+            cwd=str(COMMAND_WIDGET_DIR),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        message = (result.stdout + "\n" + result.stderr).strip()
+        self.output.setPlainText(message or f"Installer exited with code {result.returncode}.")
+        if result.returncode == 0:
+            self.parent_window.add_history(f"Command Widget {action} completed")
+            QMessageBox.information(self, "Command Widget", f"Command Widget {action} completed successfully.")
+        else:
+            QMessageBox.warning(self, "Command Widget", f"Installation failed with exit code {result.returncode}.\n\n{message[-1200:]}")
+        self.refresh()
+
+    def open_widget_project(self):
+        if COMMAND_WIDGET_DIR.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(COMMAND_WIDGET_DIR)))
+        else:
+            QMessageBox.information(self, "Command Widget", f"Project folder not found:\n{COMMAND_WIDGET_DIR}")
+
+
 class CommandIntelPage(QWidget):
     def __init__(self, parent_window):
         super().__init__()
@@ -3723,6 +3882,8 @@ class MainWindow(QMainWindow):
                 page = ControlPage(self)
             elif module_id == "tools":
                 page = ToolLibraryPage(self)
+            elif module_id == "command_apps":
+                page = CommandAppsPage(self)
             elif module_id == "offline":
                 page = OfflineKnowledgePage(self)
             elif module_id == "software":
@@ -3802,6 +3963,8 @@ class MainWindow(QMainWindow):
             self.pages["software"].refresh()
         if module_id == "tools":
             self.pages["tools"].refresh()
+        if module_id == "command_apps":
+            self.pages["command_apps"].refresh()
         self.setGeometry(geometry)
         QTimer.singleShot(0, lambda saved=geometry: self.setGeometry(saved))
 
