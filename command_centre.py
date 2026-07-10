@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -3946,6 +3947,15 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    crash_dir = Path.home() / ".local/state/command-centre"
+    crash_dir.mkdir(parents=True, exist_ok=True)
+
+    def report_crash(error_type, error, error_traceback):
+        report = "".join(traceback.format_exception(error_type, error, error_traceback))
+        (crash_dir / "crash.log").write_text(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n{report}", encoding="utf-8")
+        sys.__excepthook__(error_type, error, error_traceback)
+
+    sys.excepthook = report_crash
     ensure_codex_on_path()
     app = QApplication(sys.argv)
     app.setStyleSheet(

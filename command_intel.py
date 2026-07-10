@@ -5,11 +5,13 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import zipfile
+from urllib.parse import urlparse
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngineUrlRequestInterceptor
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QGraphicsScene, QGraphicsView, QGridLayout,
@@ -36,8 +38,15 @@ class RequestBlocker(QWebEngineUrlRequestInterceptor):
         "cookielaw.org", "onetrust.com", "trustarc.com",
     )
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.enabled = True
+        self.allowlist = set()
+        self.extra_rules = set()
+
     def interceptRequest(self, info):
-        if any(value in info.requestUrl().host().lower() for value in self.blocked):
+        host = info.requestUrl().host().lower()
+        if self.enabled and host not in self.allowlist and any(value in host for value in self.blocked + tuple(self.extra_rules)):
             info.block(True)
 
 
@@ -72,15 +81,30 @@ class IntelStore:
                 id INTEGER PRIMARY KEY, case_id INTEGER, action TEXT NOT NULL, detail TEXT DEFAULT '',
                 created_utc TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
         """)
+        if not self.db.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]:
+            self.db.execute("INSERT INTO schema_version VALUES(2)")
+        self.ensure_column("cases", "status", "TEXT DEFAULT 'active'")
+        self.ensure_column("cases", "authorization", "TEXT DEFAULT ''")
+        self.ensure_column("cases", "scope", "TEXT DEFAULT ''")
+        self.ensure_column("cases", "jurisdiction", "TEXT DEFAULT ''")
+        self.ensure_column("cases", "classification", "TEXT DEFAULT 'Private'")
+        self.ensure_column("cases", "retention_until", "TEXT DEFAULT ''")
         self.db.commit()
+
+    def ensure_column(self, table, name, declaration):
+        columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+        if name not in columns:
+            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
     @staticmethod
     def now():
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    def cases(self):
-        return self.db.execute("SELECT * FROM cases ORDER BY updated_utc DESC").fetchall()
+    def cases(self, include_archived=True):
+        where = "" if include_archived else "WHERE status != 'archived'"
+        return self.db.execute(f"SELECT * FROM cases {where} ORDER BY updated_utc DESC").fetchall()
 
     def add_case(self, name, description=""):
         now = self.now()
@@ -90,6 +114,21 @@ class IntelStore:
         )
         self.db.commit()
         return cursor.lastrowid
+
+    def update_case(self, case_id, **fields):
+        allowed = {"name", "description", "status", "authorization", "scope", "jurisdiction", "classification", "retention_until"}
+        values = {key: value for key, value in fields.items() if key in allowed}
+        if not values: return
+        values["updated_utc"] = self.now()
+        assignments = ",".join(f"{key}=?" for key in values)
+        self.db.execute(f"UPDATE cases SET {assignments} WHERE id=?", (*values.values(), case_id)); self.db.commit()
+
+    def delete_case(self, case_id):
+        self.db.execute("DELETE FROM cases WHERE id=?", (case_id,)); self.db.commit()
+
+    def backup(self, destination):
+        target = sqlite3.connect(destination)
+        self.db.backup(target); target.close()
 
     def evidence(self, case_id):
         return self.db.execute("SELECT * FROM evidence WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()
@@ -142,6 +181,7 @@ class AdvancedCommandIntelPage(QWidget):
         self.store = IntelStore()
         self.case_id = None
         self.blocker = RequestBlocker(self)
+        self.browser_profiles = {}
         self.tabs = QTabWidget()
         self.browser_tabs = QTabWidget()
         self.browser_tabs.setTabsClosable(True)
@@ -235,9 +275,9 @@ class AdvancedCommandIntelPage(QWidget):
         new = QPushButton("+"); back = QPushButton("←"); forward = QPushButton("→"); reload_button = QPushButton("↻")
         self.address = QLineEdit(); self.address.setPlaceholderText("URL")
         self.privacy = QComboBox(); self.privacy.addItems(["Standard", "Strict (no JavaScript)", "External browser"])
-        capture = QPushButton("Capture evidence"); external = QPushButton("External")
+        capture = QPushButton("Capture evidence"); allow_site = QPushButton("Allow site ads"); external = QPushButton("External")
         for widget in (new, back, forward, reload_button): bar.addWidget(widget)
-        bar.addWidget(QLabel("● AD BLOCK ON")); bar.addWidget(self.address, 1); bar.addWidget(self.privacy); bar.addWidget(capture); bar.addWidget(external)
+        bar.addWidget(QLabel("● AD BLOCK ON")); bar.addWidget(self.address, 1); bar.addWidget(self.privacy); bar.addWidget(capture); bar.addWidget(allow_site); bar.addWidget(external)
         layout.addLayout(bar); layout.addWidget(self.browser_tabs, 1)
         new.clicked.connect(lambda: self.new_browser_tab("https://duckduckgo.com"))
         back.clicked.connect(lambda: self.current_browser() and self.current_browser().back())
@@ -245,6 +285,7 @@ class AdvancedCommandIntelPage(QWidget):
         reload_button.clicked.connect(lambda: self.current_browser() and self.current_browser().reload())
         self.address.returnPressed.connect(lambda: self.open_url(self.address.text()))
         capture.clicked.connect(self.capture_page)
+        allow_site.clicked.connect(self.allow_current_site)
         external.clicked.connect(lambda: self.current_browser() and QDesktopServices.openUrl(self.current_browser().url()))
         self.privacy.currentTextChanged.connect(self.apply_privacy)
         self.tabs.addTab(page, "Research Browser")
@@ -253,14 +294,37 @@ class AdvancedCommandIntelPage(QWidget):
         return self.browser_tabs.currentWidget()
 
     def new_browser_tab(self, url):
-        view = QWebEngineView(); view.page().profile().setUrlRequestInterceptor(self.blocker)
+        view = QWebEngineView()
+        profile_key = str(self.case_id or "temporary")
+        if profile_key not in self.browser_profiles:
+            if self.case_id:
+                profile = QWebEngineProfile(f"command-intel-case-{profile_key}", self)
+                profile.setPersistentStoragePath(str(DATA_DIR / "browser" / profile_key))
+                profile.setCachePath(str(DATA_DIR / "browser" / profile_key / "cache"))
+                profile.setDownloadPath(str(DATA_DIR / "downloads" / profile_key))
+            else:
+                profile = QWebEngineProfile(self)
+            profile.setUrlRequestInterceptor(self.blocker)
+            self.browser_profiles[profile_key] = profile
+        view.setPage(QWebEnginePage(self.browser_profiles[profile_key], view))
         view.urlChanged.connect(lambda value, browser=view: self.browser_url_changed(browser, value))
         view.titleChanged.connect(lambda title, browser=view: self.browser_title_changed(browser, title))
         index = self.browser_tabs.addTab(view, "New tab"); self.browser_tabs.setCurrentIndex(index)
         self.apply_privacy(); view.setUrl(QUrl(url)); return view
 
+    def allow_current_site(self):
+        browser = self.current_browser()
+        if not browser: return
+        host = browser.url().host().lower()
+        if host:
+            self.blocker.allowlist.add(host); browser.reload(); self.status.setText(f"Ad-block allowlist: {host}")
+
     def open_url(self, url):
         if not url.startswith(("http://", "https://")): url = "https://" + url
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            QMessageBox.warning(self, "Blocked URL", "Command Intel only opens valid HTTP and HTTPS addresses.")
+            return
         if self.privacy.currentText() == "External browser": QDesktopServices.openUrl(QUrl(url)); return
         self.new_browser_tab(url); self.tabs.setCurrentIndex(1)
 
@@ -282,15 +346,16 @@ class AdvancedCommandIntelPage(QWidget):
     def build_cases(self):
         page = QWidget(); layout = QGridLayout(page)
         cases, cases_layout = self.frame("CASES")
-        self.case_list = QListWidget(); new = QPushButton("New case"); report = QPushButton("Export HTML report")
-        cases_layout.addWidget(self.case_list); cases_layout.addWidget(new); cases_layout.addWidget(report)
+        self.case_list = QListWidget(); new = QPushButton("New case"); edit = QPushButton("Authorization & scope"); archive = QPushButton("Archive"); delete = QPushButton("Delete"); backup = QPushButton("Backup database"); bundle = QPushButton("Export case bundle"); report = QPushButton("Export HTML report")
+        cases_layout.addWidget(self.case_list)
+        for button in (new, edit, archive, delete, backup, bundle, report): cases_layout.addWidget(button)
         evidence, evidence_layout = self.frame("EVIDENCE · SHA-256 INTEGRITY")
         buttons = QHBoxLayout(); add_file = QPushButton("Import file"); add_note = QPushButton("Add note"); verify = QPushButton("Verify hashes")
         buttons.addWidget(add_file); buttons.addWidget(add_note); buttons.addWidget(verify)
         self.evidence_table = QTableWidget(0, 5); self.evidence_table.setHorizontalHeaderLabels(["UTC", "Type", "Title", "SHA-256", "Source"])
         evidence_layout.addLayout(buttons); evidence_layout.addWidget(self.evidence_table)
         layout.addWidget(cases, 0, 0); layout.addWidget(evidence, 0, 1); layout.setColumnStretch(1, 2)
-        new.clicked.connect(self.new_case); report.clicked.connect(self.export_report); add_file.clicked.connect(self.import_file)
+        new.clicked.connect(self.new_case); edit.clicked.connect(self.edit_case); archive.clicked.connect(self.archive_case); delete.clicked.connect(self.delete_case); backup.clicked.connect(self.backup_database); bundle.clicked.connect(self.export_case_bundle); report.clicked.connect(self.export_report); add_file.clicked.connect(self.import_file)
         add_note.clicked.connect(self.add_note_evidence); verify.clicked.connect(self.verify_hashes); self.case_list.currentItemChanged.connect(self.case_list_changed)
         self.tabs.addTab(page, "Cases & Evidence")
 
@@ -309,6 +374,41 @@ class AdvancedCommandIntelPage(QWidget):
     def new_case(self):
         name, ok = QInputDialog.getText(self, "New investigation", "Case name:")
         if ok and name.strip(): self.case_id = self.store.add_case(name.strip()); self.refresh_cases(); self.refresh_evidence()
+
+    def edit_case(self):
+        if not self.require_case(): return
+        row = self.store.db.execute("SELECT * FROM cases WHERE id=?", (self.case_id,)).fetchone()
+        authorization, ok = QInputDialog.getMultiLineText(self, "Authorization", "Authority and purpose:", row["authorization"] or "")
+        if not ok: return
+        scope, ok = QInputDialog.getMultiLineText(self, "Scope", "Authorized targets and limits:", row["scope"] or "")
+        if not ok: return
+        jurisdiction, ok = QInputDialog.getText(self, "Jurisdiction", "Jurisdiction:", text=row["jurisdiction"] or "")
+        if ok: self.store.update_case(self.case_id, authorization=authorization, scope=scope, jurisdiction=jurisdiction); self.refresh_cases()
+
+    def archive_case(self):
+        if self.require_case() and QMessageBox.question(self, "Archive case", "Archive this case?") == QMessageBox.Yes:
+            self.store.update_case(self.case_id, status="archived"); self.refresh_cases()
+
+    def delete_case(self):
+        if not self.require_case(): return
+        if QMessageBox.warning(self, "Delete case", "Permanently delete the case database records? Copied evidence files are retained for recovery.", QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self.store.delete_case(self.case_id); self.case_id = None; self.refresh_cases()
+
+    def backup_database(self):
+        target, _ = QFileDialog.getSaveFileName(self, "Backup Command Intel", f"command-intel-{time.strftime('%Y%m%d')}.db", "SQLite (*.db)")
+        if target: self.store.backup(target); self.status.setText(f"Database backup saved to {target}")
+
+    def export_case_bundle(self):
+        if not self.require_case(): return
+        target, _ = QFileDialog.getSaveFileName(self, "Export case bundle", f"command-intel-case-{self.case_id}.zip", "ZIP (*.zip)")
+        if not target: return
+        manifest = {"case_id": self.case_id, "exported_utc": self.store.now(), "evidence": [dict(row) for row in self.store.evidence(self.case_id)], "entities": [dict(row) for row in self.store.entities(self.case_id)], "relations": [dict(row) for row in self.store.relations(self.case_id)]}
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+            for row in self.store.evidence(self.case_id):
+                path = Path(row["local_path"]) if row["local_path"] else None
+                if path and path.exists() and path.is_file(): archive.write(path, f"evidence/{path.name}")
+        self.status.setText(f"Case bundle exported to {target}")
 
     def select_case(self, index):
         self.case_id = self.case_combo.itemData(index) if index >= 0 else None
@@ -353,7 +453,14 @@ class AdvancedCommandIntelPage(QWidget):
         path = case_dir / f"web-{int(time.time())}.png"
         if browser.grab().save(str(path), "PNG"):
             digest = self.hash_file(path); self.store.add_evidence(self.case_id, browser.title() or "Web capture", "screenshot", browser.url().toString(), str(path), digest)
+            browser.page().toHtml(lambda markup, b=browser, folder=case_dir: self.save_page_html(markup, b, folder))
             self.refresh_evidence(); self.status.setText(f"Captured {path.name}")
+
+    def save_page_html(self, markup, browser, case_dir):
+        path = case_dir / f"web-{int(time.time())}.html"
+        path.write_text(markup, encoding="utf-8")
+        self.store.add_evidence(self.case_id, f"{browser.title() or 'Web page'} (HTML)", "web-page", browser.url().toString(), str(path), self.hash_file(path), "Captured rendered page source")
+        self.refresh_evidence()
 
     def refresh_evidence(self):
         rows = self.store.evidence(self.case_id) if self.case_id else []
@@ -429,10 +536,10 @@ class AdvancedCommandIntelPage(QWidget):
         for title, command, description in tools:
             state = "INSTALLED" if shutil.which(command) else "NOT INSTALLED"
             item = QListWidgetItem(f"{title:<18} {state:<15} {description}"); item.setData(Qt.UserRole, command); self.tool_list.addItem(item)
-        controls = QHBoxLayout(); run = QPushButton("Run selected in terminal"); workflow = QPushButton("Run domain workflow"); controls.addWidget(run); controls.addWidget(workflow); controls.addStretch()
+        controls = QHBoxLayout(); run = QPushButton("Run selected in terminal"); import_results = QPushButton("Import structured JSON"); workflow = QPushButton("Run domain workflow"); controls.addWidget(run); controls.addWidget(import_results); controls.addWidget(workflow); controls.addStretch()
         self.workflow_output = QPlainTextEdit(); self.workflow_output.setReadOnly(True)
         layout.addWidget(self.tool_list); layout.addLayout(controls); layout.addWidget(self.workflow_output)
-        run.clicked.connect(self.run_tool); workflow.clicked.connect(self.domain_workflow)
+        run.clicked.connect(self.run_tool); import_results.clicked.connect(self.import_structured_results); workflow.clicked.connect(self.domain_workflow)
         self.tabs.addTab(page, "Tools & Workflows")
 
     def run_tool(self):
@@ -445,6 +552,26 @@ class AdvancedCommandIntelPage(QWidget):
         terminals = [["konsole", "-e"], ["gnome-terminal", "--"], ["xterm", "-e"]]
         for terminal in terminals:
             if shutil.which(terminal[0]): subprocess.Popen(terminal + [command, argument]); self.store.log(self.case_id, "Tool launched", f"{command} {argument}"); return
+
+    def import_structured_results(self):
+        if not self.require_case(): return
+        source, _ = QFileDialog.getOpenFileName(self, "Import structured tool results", "", "JSON (*.json)")
+        if not source: return
+        try:
+            payload = json.loads(Path(source).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Import failed", str(error)); return
+        rows = payload if isinstance(payload, list) else payload.get("entities", []) if isinstance(payload, dict) else []
+        imported = 0
+        for row in rows:
+            if not isinstance(row, dict): continue
+            value = str(row.get("value") or row.get("host") or row.get("username") or "").strip()
+            if value:
+                kind = str(row.get("type") or ("IP Address" if row.get("host") else "Other"))
+                self.store.add_entity(self.case_id, kind, value, f"Imported: {Path(source).name}", int(row.get("confidence", 60))); imported += 1
+        digest = self.hash_file(source)
+        self.store.add_evidence(self.case_id, Path(source).name, "tool-results", source, source, digest, f"Imported {imported} structured entities")
+        self.refresh_evidence(); self.refresh_graph(); self.status.setText(f"Imported {imported} entities")
 
     def domain_workflow(self):
         domain, ok = QInputDialog.getText(self, "Domain workflow", "Authorized domain:")

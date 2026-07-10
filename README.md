@@ -31,6 +31,7 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 - Its research browser supports multiple tabs, ad/tracker blocking, standard and JavaScript-disabled privacy modes, external-browser handoff, and direct capture into the active case
 - Tool and workflow support detects common local OSINT utilities, launches authorized jobs in a terminal, and provides a repeatable domain-research workflow
 - Command AI provides deterministic case summaries and evidence-grounded local analysis through Ollama when a local model is available
+- The v0.2-alpha hardening layer adds automatic database migrations, database backups, case archives, authorization and scope records, exportable ZIP case bundles, case-isolated browser storage/downloads, ad-block allowlisting, rendered HTML capture, structured JSON result imports, strict URL validation, crash reports, and automated data-layer tests
 - Deployment Centre is a profile-driven mission launcher with GUI add/edit/duplicate/remove controls, using JSON templates from `deployments/default_deployments.json` and custom profiles from `~/.config/command-centre/deployment_profiles.json`
 - Offline Knowledge has a single ZIM library location button, a ZIM file list, and an in-app reader
 
@@ -56,6 +57,15 @@ Command Intel stores its case database and copied evidence under:
 
 ```text
 ~/.local/share/command-centre/intel/
+```
+
+Crash reports are written to `~/.local/state/command-centre/crash.log`. Arch packaging files are under `packaging/arch/`.
+
+Run the automated checks with:
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile command_centre.py command_intel.py
 ```
 
 ## Notes

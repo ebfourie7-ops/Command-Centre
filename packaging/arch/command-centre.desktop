@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Command Centre
+Comment=CommandOS operations and investigation dashboard
+Exec=command-centre
+Terminal=false
+Type=Application
+Categories=System;Utility;Security;
+Icon=/opt/command-centre/logo.png
