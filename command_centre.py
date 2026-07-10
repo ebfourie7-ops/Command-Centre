@@ -2190,6 +2190,9 @@ class CommandCodePage(QWidget):
         link = QPushButton("Link ChatGPT")
         link.clicked.connect(self.link_chatgpt_account)
         row.addWidget(link)
+        unlink = QPushButton("Unlink ChatGPT")
+        unlink.clicked.connect(self.unlink_chatgpt_account)
+        row.addWidget(unlink)
         return row
 
     def explorer_panel(self):
@@ -2259,6 +2262,7 @@ class CommandCodePage(QWidget):
         row.addWidget(attach)
         for label, handler in [
             ("Account Status", self.codex_account_status),
+            ("Unlink", self.unlink_chatgpt_account),
             ("Explain File", self.explain_current_file),
             ("Review", self.review_workspace),
             ("Stop", self.stop_codex),
@@ -2291,9 +2295,12 @@ class CommandCodePage(QWidget):
         reset.clicked.connect(self.reset_codex_usage)
         status = QPushButton("Account Status")
         status.clicked.connect(self.codex_account_status)
+        unlink = QPushButton("Unlink ChatGPT")
+        unlink.clicked.connect(self.unlink_chatgpt_account)
         row.addWidget(save)
         row.addWidget(reset)
         row.addWidget(status)
+        row.addWidget(unlink)
         row.addStretch()
         layout.addLayout(row)
         note = QLabel("Codex reports token usage for each run, but it does not expose your account-wide quota. Set your local limit here to display x of y.")
@@ -2485,6 +2492,25 @@ class CommandCodePage(QWidget):
             return
         out, err, code = run_text([command, "login", "status"], 8)
         self.append_chat("system", "Codex account status\n" + (out or err or f"codex login status exited with {code}"))
+
+    def unlink_chatgpt_account(self):
+        command = self.codex_command()
+        if not command:
+            self.append_chat("system", "Codex CLI was not found.")
+            return
+        if not confirm(
+            self,
+            "Unlink ChatGPT Account",
+            "Remove the locally stored Codex authentication credentials from this computer?\n\nYou will need to link ChatGPT again before using Codex.",
+        ):
+            return
+        out, err, code = run_text([command, "logout"], 15)
+        if code == 0:
+            self.codex_status.setText("ChatGPT unlinked")
+            self.append_chat("system", "ChatGPT/OpenAI was unlinked from Codex on this computer.\n" + (out or "Local authentication credentials removed."))
+        else:
+            self.codex_status.setText("Unlink failed")
+            self.append_chat("system", "Unable to unlink ChatGPT.\n" + (err or out or f"codex logout exited with {code}"))
 
     def load_codex_usage(self):
         try:
