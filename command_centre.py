@@ -1288,6 +1288,8 @@ class SoftwarePage(QWidget):
         self.cachyos_pi_status.setWordWrap(True)
         self.cachyos_catalog = {}
         self.cachyos_checked = set()
+        self.package_metadata = {}
+        self.repository_packages = []
         self.cachyos_category = QComboBox()
         self.cachyos_search = QLineEdit()
         self.cachyos_search.setPlaceholderText("Filter CommandOS popular applications")
@@ -1296,7 +1298,7 @@ class SoftwarePage(QWidget):
         self.cachyos_search.textChanged.connect(self.render_cachyos_catalog)
         self.cachyos_list.itemChanged.connect(self.cachyos_item_changed)
         self.package_search = QLineEdit()
-        self.package_search.setPlaceholderText("Search packages")
+        self.package_search.setPlaceholderText("Filter repository packages by name or description")
         self.package_search.returnPressed.connect(self.search_packages)
         self.package_list = QListWidget()
         self.package_list.itemDoubleClicked.connect(lambda _: self.install_selected_package())
@@ -1453,6 +1455,7 @@ class SoftwarePage(QWidget):
         install_curated.clicked.connect(self.install_cachyos_packages)
         curated_layout.addWidget(install_curated)
         layout.addWidget(curated)
+        self.load_package_metadata()
         self.load_cachyos_catalog()
 
         search_heading = QLabel("REPOSITORY PACKAGE SEARCH")
@@ -1460,6 +1463,7 @@ class SoftwarePage(QWidget):
         layout.addWidget(search_heading)
         layout.addWidget(self.package_search)
         layout.addWidget(self.package_list)
+        self.show_repository_packages()
 
         row = QHBoxLayout()
         for label, handler in [
@@ -1673,6 +1677,26 @@ class SoftwarePage(QWidget):
         self.render_cachyos_catalog()
         self.refresh_tools_status()
 
+    def load_package_metadata(self):
+        if not command_exists("expac"):
+            return
+        output, _, code = run_text(["expac", "-S", "%r\\t%n\\t%v\\t%d"], 12)
+        if code != 0:
+            return
+        seen = set()
+        for line in output.splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) != 4:
+                continue
+            repository, name, version, description = parts
+            if name in seen:
+                continue
+            seen.add(name)
+            record = {"repository": repository, "name": name, "version": version, "description": description}
+            self.repository_packages.append(record)
+            self.package_metadata[name] = record
+        self.repository_packages.sort(key=lambda record: record["name"].lower())
+
     def render_cachyos_catalog(self):
         if not hasattr(self, "cachyos_list"):
             return
@@ -1690,7 +1714,13 @@ class SoftwarePage(QWidget):
                 if needle and needle not in category.lower() and needle not in bundle.lower():
                     continue
                 state = "INSTALLED" if all(package in installed for package in packages) else "AVAILABLE"
-                item = QListWidgetItem(f"{packages[0]}  ·  {category}  ·  {state}\n{bundle}")
+                descriptions = [self.package_metadata[package]["description"] for package in packages if package in self.package_metadata]
+                description = descriptions[0] if descriptions else f"CommandOS curated {category.lower()} application."
+                bundle_note = f"Package bundle: {bundle}\n" if len(packages) > 1 else ""
+                item = QListWidgetItem(
+                    f"{packages[0]}  ·  {category}  ·  {state}\n"
+                    f"{description}\n{bundle_note}"
+                )
                 item.setData(Qt.UserRole, packages)
                 item.setCheckState(Qt.Checked if bundle in self.cachyos_checked else Qt.Unchecked)
                 self.cachyos_list.addItem(item)
@@ -1727,6 +1757,24 @@ class SoftwarePage(QWidget):
         if self.terminal_command("Install CommandOS Curated Packages", command):
             self.record_transaction("CommandOS curated package installation", command)
             self.parent_window.add_history(f"CommandOS curated install started: {len(packages)} package(s)")
+
+    def show_repository_packages(self, records=None):
+        records = self.repository_packages[:150] if records is None else records[:150]
+        self.package_list.clear()
+        for record in records:
+            item = QListWidgetItem(
+                f"{record['name']}  {record['version']}  ·  {record['repository']}\n"
+                f"{record['description']}"
+            )
+            item.setData(Qt.UserRole, record["name"])
+            self.package_list.addItem(item)
+        if records:
+            self.result.setPlainText(
+                f"Showing {len(records)} of {len(self.repository_packages)} configured repository packages. "
+                "Type in the filter to narrow the catalogue; double-click a package to install it."
+            )
+        elif not self.repository_packages:
+            self.result.setPlainText("Repository package metadata is unavailable. Use Search to query pacman directly.")
 
     def clean_ansi(self, text):
         return re.sub(r"\x1b\[[0-9;]*m", "", text)
@@ -1904,10 +1952,27 @@ class SoftwarePage(QWidget):
 
     def search_packages(self):
         query = self.package_search.text().strip()
-        self.package_list.clear()
+        if not query and self.repository_packages:
+            self.show_repository_packages()
+            return
         if len(query) < 2:
             self.result.setPlainText("Type at least two characters to search packages.")
             return
+        if self.repository_packages:
+            needle = query.lower()
+            matches = [
+                record for record in self.repository_packages
+                if needle in record["name"].lower()
+                or needle in record["description"].lower()
+                or needle in record["repository"].lower()
+            ]
+            self.show_repository_packages(matches)
+            self.result.setPlainText(
+                f"Found {len(matches)} repository package(s) matching '{query}'. "
+                "Showing the first 150 results. Double-click a package to install it."
+            )
+            return
+        self.package_list.clear()
         if not command_exists("pacman"):
             self.result.setPlainText("pacman is not available.")
             return
