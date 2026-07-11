@@ -1290,7 +1290,7 @@ class SoftwarePage(QWidget):
         self.cachyos_checked = set()
         self.cachyos_category = QComboBox()
         self.cachyos_search = QLineEdit()
-        self.cachyos_search.setPlaceholderText("Filter CachyOS popular applications")
+        self.cachyos_search.setPlaceholderText("Filter CommandOS popular applications")
         self.cachyos_list = QListWidget()
         self.cachyos_category.currentTextChanged.connect(self.render_cachyos_catalog)
         self.cachyos_search.textChanged.connect(self.render_cachyos_catalog)
@@ -1435,9 +1435,9 @@ class SoftwarePage(QWidget):
         frame, layout = self.panel("Packages")
         layout.addWidget(self.tools_status)
 
-        curated, curated_layout = self.panel("CachyOS Curated Packages")
+        curated, curated_layout = self.panel("CommandOS Curated Packages")
         curated_body = QLabel(
-            "Browse CachyOS's Popular Applications catalogue by category, including browsers, "
+            "Browse the CommandOS Popular Applications catalogue by category, including browsers, "
             "development, graphics, multimedia, office, gaming, and virtualization packages."
         )
         curated_body.setObjectName("muted")
@@ -1646,7 +1646,7 @@ class SoftwarePage(QWidget):
                 f"READY  ·  {package_count} curated entries in {len(self.cachyos_catalog)} categories"
             )
         else:
-            self.cachyos_pi_status.setText("CATALOGUE UNAVAILABLE  ·  cachyos-packageinstaller data was not found")
+            self.cachyos_pi_status.setText("CATALOGUE UNAVAILABLE  ·  CommandOS package catalogue data was not found")
 
     def load_cachyos_catalog(self):
         try:
@@ -1712,7 +1712,7 @@ class SoftwarePage(QWidget):
                 if package not in packages:
                     packages.append(package)
         if not packages:
-            self.result.setPlainText("Check one or more CachyOS catalogue entries first.")
+            self.result.setPlainText("Check one or more CommandOS catalogue entries first.")
             return
         quoted = " ".join(shlex.quote(package) for package in packages)
         if command_exists("yay"):
@@ -1722,11 +1722,11 @@ class SoftwarePage(QWidget):
         else:
             command = f"sudo pacman -S --needed {quoted}"
         review = "\n".join(f"• {package}" for package in packages)
-        if not confirm(self, "Install CachyOS Curated Packages", f"Install these packages?\n\n{review}\n\nCommand:\n{command}"):
+        if not confirm(self, "Install CommandOS Curated Packages", f"Install these packages?\n\n{review}\n\nCommand:\n{command}"):
             return
-        if self.terminal_command("Install CachyOS Curated Packages", command):
-            self.record_transaction("CachyOS curated package installation", command)
-            self.parent_window.add_history(f"CachyOS curated install started: {len(packages)} package(s)")
+        if self.terminal_command("Install CommandOS Curated Packages", command):
+            self.record_transaction("CommandOS curated package installation", command)
+            self.parent_window.add_history(f"CommandOS curated install started: {len(packages)} package(s)")
 
     def clean_ansi(self, text):
         return re.sub(r"\x1b\[[0-9;]*m", "", text)
