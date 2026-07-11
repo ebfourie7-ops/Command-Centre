@@ -72,7 +72,9 @@ SOFTWARE_HISTORY_FILE = CONFIG_DIR / "software_history.json"
 CACHYOS_PACKAGE_CATALOG = Path("/usr/lib/cachyos-pi/pkglist.yaml")
 DEPLOYMENT_STATE_FILE = CONFIG_DIR / "deployment_state.json"
 APP_DIR = Path(__file__).resolve().parent
-LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
+DEVELOPMENT_LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
+INSTALLED_LOGO_FILE = APP_DIR / "logo.png"
+LOGO_FILE = DEVELOPMENT_LOGO_FILE if DEVELOPMENT_LOGO_FILE.exists() else INSTALLED_LOGO_FILE
 SPLASH_FILE = Path.home() / "Desktop/splash screen.png"
 INVENTORY_DIR = APP_DIR / "inventory"
 DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
@@ -6020,6 +6022,11 @@ def main():
     sys.excepthook = report_crash
     ensure_codex_on_path()
     app = QApplication(sys.argv)
+    app.setApplicationName("Command Centre")
+    app.setApplicationDisplayName("Command Centre")
+    app.setDesktopFileName("command-centre")
+    if LOGO_FILE.exists():
+        app.setWindowIcon(QIcon(str(LOGO_FILE)))
     app.setStyleSheet(
         """
         QWidget {
