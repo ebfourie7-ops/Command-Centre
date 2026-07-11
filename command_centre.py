@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import html
+import hashlib
 import os
 import re
 import shlex
@@ -13,10 +14,12 @@ import time
 import traceback
 import urllib.request
 import urllib.parse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
+from PySide6.QtCore import QPointF, Qt, QProcess, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -60,11 +63,16 @@ OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 CODEX_USAGE_CONFIG = CONFIG_DIR / "codex_usage.json"
 USER_DEPLOYMENTS_CONFIG = CONFIG_DIR / "deployment_profiles.json"
 INTEL_CONFIG = CONFIG_DIR / "command_intel.json"
+CONTROL_QUEUE_FILE = CONFIG_DIR / "control_queue.json"
+TOOL_STATE_FILE = CONFIG_DIR / "tool_library_state.json"
+SOFTWARE_HISTORY_FILE = CONFIG_DIR / "software_history.json"
+DEPLOYMENT_STATE_FILE = CONFIG_DIR / "deployment_state.json"
 APP_DIR = Path(__file__).resolve().parent
 LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
 SPLASH_FILE = Path.home() / "Desktop/splash screen.png"
 INVENTORY_DIR = APP_DIR / "inventory"
 DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
+CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
 COMMAND_WIDGET_DIR = Path.home() / "Desktop/Code/Command-widget"
 
 
@@ -389,6 +397,7 @@ class CockpitCard(QFrame):
         self.body = QLabel("--")
         self.body.setObjectName("muted")
         self.body.setWordWrap(True)
+        self.body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         layout = QVBoxLayout(self)
@@ -399,11 +408,83 @@ class CockpitCard(QFrame):
         self.body.setText(text)
 
 
-class DashboardPage(QWidget):
-    def __init__(self):
+class Sparkline(QWidget):
+    def __init__(self, color="#49bfff", parent=None):
+        super().__init__(parent)
+        self.values = deque(maxlen=24)
+        self.color = QColor(color)
+        self.setMinimumHeight(42)
+        self.setMaximumHeight(42)
+
+    def add_value(self, value):
+        try:
+            self.values.append(float(value))
+        except (TypeError, ValueError):
+            self.values.append(None)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#081019"))
+        painter.setPen(QPen(QColor("#21384a"), 1))
+        painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+        if len(self.values) < 2:
+            return
+        valid = [value for value in self.values if value is not None]
+        if not valid:
+            return
+        high = max(100.0, max(valid))
+        step = self.width() / max(1, self.values.maxlen - 1)
+        painter.setPen(QPen(self.color, 2))
+        segment = []
+        for index, value in enumerate(self.values):
+            if value is None:
+                if len(segment) > 1:
+                    painter.drawPolyline(QPolygonF(segment))
+                segment = []
+                continue
+            y = self.height() - 4 - (value / high) * (self.height() - 8)
+            segment.append(QPointF(index * step, y))
+        if len(segment) > 1:
+            painter.drawPolyline(QPolygonF(segment))
+
+
+class TelemetryCard(QFrame):
+    def __init__(self, title, color="#49bfff"):
         super().__init__()
+        self.setObjectName("card")
+        self.title = QLabel(title)
+        self.title.setObjectName("panelTitle")
+        self.value = QLabel("--")
+        self.value.setObjectName("metricValue")
+        self.detail = QLabel("Waiting for telemetry")
+        self.detail.setObjectName("muted")
+        self.detail.setWordWrap(True)
+        self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.sparkline = Sparkline(color)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.title)
+        layout.addWidget(self.value)
+        layout.addWidget(self.detail)
+        layout.addStretch()
+        layout.addWidget(self.sparkline)
+
+    def set_metric(self, value, detail, history_value):
+        self.value.setText(value)
+        self.detail.setText(detail)
+        self.sparkline.add_value(history_value)
+
+
+class DashboardPage(QWidget):
+    def __init__(self, parent_window):
+        super().__init__()
+        self.parent_window = parent_window
+        self.last_telemetry_timestamp = None
         self.header = QLabel("--")
         self.header.setObjectName("healthHeader")
+        self.header.setWordWrap(True)
+        self.header.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.hero_logo = QLabel()
         self.hero_logo.setObjectName("heroLogo")
         self.hero_logo.setFixedSize(168, 126)
@@ -414,16 +495,29 @@ class DashboardPage(QWidget):
         else:
             self.hero_logo.setText("C>")
 
-        self.cpu = CockpitCard("CPU")
-        self.gpu = CockpitCard("GPU")
-        self.memory = CockpitCard("MEMORY")
-        self.storage_summary = CockpitCard("STORAGE")
+        self.cpu = TelemetryCard("CPU", "#49bfff")
+        self.gpu = TelemetryCard("GPU", "#ad7cff")
+        self.memory = TelemetryCard("MEMORY", "#42d989")
+        self.storage_summary = TelemetryCard("STORAGE", "#f0b84b")
         self.health = CockpitCard("SYSTEM HEALTH")
-        self.network = CockpitCard("NETWORK")
-        self.processes = CockpitCard("TOP PROCESSES")
-        self.storage = CockpitCard("STORAGE")
-        self.alerts = CockpitCard("ALERTS & RECOMMENDATIONS")
+        self.readiness = CockpitCard("COMMANDOS READINESS")
+        self.processes = CockpitCard("RESOURCE CONSUMERS · CPU")
         self.activity = CockpitCard("RECENT ACTIVITY")
+        self.alerts_frame, self.alerts_layout = self.panel("ALERTS & RECOMMENDATIONS")
+        self.quick_frame, quick_layout = self.panel("QUICK ACTIONS")
+        actions = QGridLayout()
+        for index, (label, callback) in enumerate([
+            ("CHECK UPDATES", lambda: self.parent_window.open_module("software")),
+            ("SYSTEM CONTROL", lambda: self.parent_window.open_module("control")),
+            ("OPEN TERMINAL", lambda: self.parent_window.open_module("command_code")),
+            ("SYSTEM INFORMATION", self.open_system_information),
+            ("RUN DIAGNOSTICS", lambda: self.parent_window.open_module("control")),
+            ("TELEMETRY STATUS", self.show_telemetry_status),
+        ]):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            actions.addWidget(button, index // 2, index % 2)
+        quick_layout.addLayout(actions)
 
         metrics = QGridLayout()
         for index, card in enumerate([self.cpu, self.gpu, self.memory, self.storage_summary]):
@@ -431,17 +525,33 @@ class DashboardPage(QWidget):
 
         middle = QGridLayout()
         middle.addWidget(self.health, 0, 0)
-        middle.addWidget(self.network, 0, 1)
-        middle.addWidget(self.processes, 1, 0)
-        middle.addWidget(self.storage, 1, 1)
+        middle.addWidget(self.readiness, 0, 1)
+        middle.addWidget(self.alerts_frame, 1, 0)
+        middle.addWidget(self.processes, 1, 1)
+        middle.setColumnStretch(0, 1)
+        middle.setColumnStretch(1, 1)
+
+        bottom = QGridLayout()
+        bottom.addWidget(self.activity, 0, 0)
+        bottom.addWidget(self.quick_frame, 0, 1)
+        bottom.setColumnStretch(0, 1)
+        bottom.setColumnStretch(1, 1)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
         layout.addWidget(self.hero_panel())
         layout.addLayout(metrics)
         layout.addLayout(middle)
-        layout.addWidget(self.alerts)
-        layout.addWidget(self.activity)
+        layout.addLayout(bottom)
+
+    def panel(self, title):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        heading = QLabel(title)
+        heading.setObjectName("panelTitle")
+        layout.addWidget(heading)
+        return frame, layout
 
     def hero_panel(self):
         frame = QFrame()
@@ -480,48 +590,80 @@ class DashboardPage(QWidget):
 
         updates = system.get("updates")
         updates_text = "updates unknown" if updates is None else f"{updates} updates"
+        telemetry_state = "LIVE" if data else "UNAVAILABLE"
         self.header.setText(
-            f"COMMANDOS    {health}    {metric_value(data, 'power_profile_label', 'Unknown').upper()}    "
-            f"UPTIME {system.get('uptime', '--').replace('up ', '').upper()}    {updates_text.upper()}"
+            f"SYSTEM  {health}   ·   POWER  {metric_value(data, 'power_profile_label', 'Unknown').upper()}   ·   "
+            f"UPTIME  {system.get('uptime', '--').replace('up ', '').upper()}   ·   {updates_text.upper()}   ·   TELEMETRY  {telemetry_state}"
         )
 
-        self.cpu.set_text(
-            f"{float(data.get('cpu_usage') or 0):.1f}%   {metric_value(data, 'cpu_temp', 'n/a')}C\n"
-            f"{metric_value(data, 'cpu_frequency', 'n/a')}\n"
-            f"Load {system.get('load', '--')}"
+        self.cpu.set_metric(
+            f"{float(data.get('cpu_usage') or 0):.1f}%",
+            f"{metric_value(data, 'cpu_temp', 'n/a')}°C  ·  {metric_value(data, 'cpu_frequency', 'n/a')}  ·  Load {system.get('load', '--')}",
+            data.get("cpu_usage") if data else None,
         )
-        self.gpu.set_text(
-            f"{float(data.get('gpu_usage') or 0):.0f}%   {metric_value(data, 'gpu_temp', 'n/a')}C\n"
-            f"{metric_value(data, 'gpu_vram', 'VRAM n/a')} VRAM\n"
-            f"{metric_value(data, 'gpu_name', 'GPU')}"
+        self.gpu.set_metric(
+            f"{float(data.get('gpu_usage') or 0):.0f}%",
+            f"{metric_value(data, 'gpu_temp', 'n/a')}°C  ·  {metric_value(data, 'gpu_vram', 'VRAM n/a')} VRAM\n{metric_value(data, 'gpu_name', 'GPU not reported')}",
+            data.get("gpu_usage") if data else None,
         )
-        self.memory.set_text(
-            f"{metric_value(data, 'ram_info', '--')}\n"
-            f"{float(data.get('ram_usage') or 0):.1f}% used\n"
-            f"Swap {system.get('swap', '--')}"
+        self.memory.set_metric(
+            f"{float(data.get('ram_usage') or 0):.1f}%",
+            f"{metric_value(data, 'ram_info', '--')}\nSwap {system.get('swap', '--')}",
+            data.get("ram_usage") if data else None,
         )
-        self.storage_summary.set_text(
-            f"{metric_value(data, 'storage_percent', '--')}%\n"
-            f"{metric_value(data, 'storage_usage', '--')}\n"
-            f"R {metric_value(data, 'storage_read', '0 B/s')}  W {metric_value(data, 'storage_write', '0 B/s')}"
+        self.storage_summary.set_metric(
+            f"{metric_value(data, 'storage_percent', '--')}%",
+            f"{metric_value(data, 'storage_usage', '--')}\nR {metric_value(data, 'storage_read', '0 B/s')}  ·  W {metric_value(data, 'storage_write', '0 B/s')}",
+            data.get("storage_percent") if data else None,
         )
 
         self.health.set_text("\n".join(self.health_lines(data, system)))
-        self.network.set_text(
-            f"{metric_value(data, 'network_iface', 'offline')}    {system.get('connection', 'Connected')}\n"
-            f"Down {metric_value(data, 'network_down', '0 B/s')}    Up {metric_value(data, 'network_up', '0 B/s')}\n"
-            f"VPN {metric_value(data, 'vpn_status', 'VPN OFF')}\n"
-            f"IP {system.get('local_ip', '--')}\n"
-            f"Firewall {system.get('firewall', 'unknown')}"
-        )
+        self.readiness.set_text("\n".join(self.readiness_lines(data, system)))
         self.processes.set_text("\n".join(system.get("top_processes", ["No process data"])))
-        self.storage.set_text(
-            f"ROOT    {metric_value(data, 'storage_percent', '--')}%    {system.get('storage_health', 'UNKNOWN')}\n"
-            f"{metric_value(data, 'storage_name', 'ROOT')}    {metric_value(data, 'storage_usage', '--')}\n"
-            f"Read {metric_value(data, 'storage_read', '0 B/s')}    Write {metric_value(data, 'storage_write', '0 B/s')}"
-        )
-        self.alerts.set_text("\n".join(issues) if issues else "OK  No immediate recommendations.")
+        self.render_alerts(issues)
         self.activity.set_text("\n".join(system.get("activity", ["No recent activity recorded."])))
+
+    def readiness_lines(self, data, system):
+        network_ready = system.get("connection") not in (None, "Unknown", "Offline")
+        security_ready = system.get("firewall") == "Enabled"
+        return [
+            f"SYSTEM          {'READY' if data and system.get('failed', 0) == 0 else 'ATTENTION'}",
+            f"NETWORK         {'READY' if network_ready else 'OFFLINE'}  ·  {system.get('connection', 'Unknown')}",
+            f"SECURITY        {'READY' if security_ready else 'ATTENTION'}  ·  Firewall {system.get('firewall', 'Unknown')}",
+            f"TELEMETRY       {'READY' if data else 'UNAVAILABLE'}",
+            f"STORAGE         {'READY' if float(data.get('storage_percent') or 0) < 85 else 'ATTENTION'}",
+        ]
+
+    def render_alerts(self, issues):
+        while self.alerts_layout.count() > 1:
+            item = self.alerts_layout.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+        if not issues:
+            label = QLabel("OK  No immediate recommendations.")
+            label.setObjectName("muted")
+            self.alerts_layout.addWidget(label)
+            return
+        for message, module_id, action in issues[:4]:
+            row = QFrame()
+            row.setObjectName("alertRow")
+            row_layout = QHBoxLayout(row)
+            label = QLabel(message)
+            label.setWordWrap(True)
+            row_layout.addWidget(label, 1)
+            button = QPushButton(action)
+            button.clicked.connect(lambda checked=False, target=module_id: self.parent_window.open_module(target))
+            row_layout.addWidget(button)
+            self.alerts_layout.addWidget(row)
+
+    def open_system_information(self):
+        if command_exists("kinfocenter"):
+            subprocess.Popen(["kinfocenter"])
+        else:
+            self.parent_window.open_module("control")
+
+    def show_telemetry_status(self):
+        QMessageBox.information(self, "Telemetry Status", f"Source: {TELEMETRY_URL}\nFallback: {STATE_FILE}")
 
     def health_lines(self, data, system):
         return [
@@ -535,17 +677,17 @@ class DashboardPage(QWidget):
     def issue_list(self, data, system):
         issues = []
         if system.get("failed", 0) > 0:
-            issues.append(f"WARN  {system.get('failed')} failed service(s) detected. Review diagnostics.")
+            issues.append((f"WARN  {system.get('failed')} failed service(s) detected.", "control", "REVIEW"))
         if system.get("updates"):
-            issues.append(f"WARN  {system.get('updates')} system update(s) available. Open Software Centre.")
+            issues.append((f"WARN  {system.get('updates')} system update(s) available.", "software", "REVIEW UPDATES"))
         if float(data.get("cpu_temp") or 0) >= 80:
-            issues.append(f"WARN  CPU temperature is high at {data.get('cpu_temp')}C. Investigate cooling/load.")
+            issues.append((f"WARN  CPU temperature is high at {data.get('cpu_temp')}°C.", "control", "DIAGNOSTICS"))
         if float(data.get("gpu_temp") or 0) >= 80:
-            issues.append(f"WARN  GPU temperature is high at {data.get('gpu_temp')}C. Investigate cooling/load.")
+            issues.append((f"WARN  GPU temperature is high at {data.get('gpu_temp')}°C.", "control", "DIAGNOSTICS"))
         if float(data.get("storage_percent") or 0) >= 85:
-            issues.append(f"WARN  Root storage is {data.get('storage_percent')}% full. Free space or move data.")
-        if data.get("vpn_status") == "VPN OFF":
-            issues.append("INFO  VPN is off.")
+            issues.append((f"WARN  Root storage is {data.get('storage_percent')}% full.", "software", "REVIEW STORAGE"))
+        if not data:
+            issues.append(("WARN  Telemetry is unavailable; dashboard readings may be stale.", "command_apps", "TELEMETRY"))
         return issues
 
 
@@ -558,7 +700,19 @@ class ControlPage(QWidget):
         self.wifi_status = QLabel("--")
         self.bluetooth_status = QLabel("--")
         self.audio_combo = QComboBox()
-        self.apply_queue = []
+        self.apply_queue = self.load_queue()
+        self.feature_cards = []
+        self.feature_state_labels = {}
+        self.state_header = QLabel("Collecting system state…")
+        self.state_header.setObjectName("healthHeader")
+        self.state_header.setWordWrap(True)
+        self.control_search = QLineEdit()
+        self.control_search.setPlaceholderText("Search settings, devices, services and actions…")
+        self.control_search.textChanged.connect(self.filter_controls)
+        self.queue_status = QLabel()
+        self.queue_status.setObjectName("panelTitle")
+        self.service_summary = QLabel("Collecting service state…")
+        self.service_summary.setObjectName("muted")
         self.service_filter = QLineEdit()
         self.service_filter.setPlaceholderText("Search services")
         self.service_filter.textChanged.connect(self.refresh_services)
@@ -571,10 +725,36 @@ class ControlPage(QWidget):
         title = QLabel("SYSTEM CONTROL")
         title.setObjectName("healthHeader")
         layout.addWidget(title)
+        layout.addWidget(self.state_header)
+        layout.addWidget(self.control_search)
         layout.addWidget(self.quick_controls_panel())
         layout.addWidget(self.system_section())
         layout.addWidget(self.commandos_section())
         layout.addWidget(self.result)
+        layout.addWidget(self.queue_bar())
+        self.update_queue_bar()
+
+    def load_queue(self):
+        try:
+            data = json.loads(CONTROL_QUEUE_FILE.read_text(encoding="utf-8"))
+            return [item for item in data if isinstance(item, dict) and item.get("command")] if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def save_queue(self):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONTROL_QUEUE_FILE.write_text(json.dumps(self.apply_queue, indent=2), encoding="utf-8")
+
+    def queue_bar(self):
+        frame = QFrame()
+        frame.setObjectName("queueBar")
+        row = QHBoxLayout(frame)
+        row.addWidget(self.queue_status, 1)
+        for label, action in [("REVIEW CHANGES", "show"), ("APPLY", "apply"), ("CLEAR", "clear")]:
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, value=action: self.queue_action(value))
+            row.addWidget(button)
+        return frame
 
     def panel(self, title):
         frame = QFrame()
@@ -586,9 +766,8 @@ class ControlPage(QWidget):
         return frame, layout
 
     def quick_controls_panel(self):
-        frame, layout = self.panel("Quick Controls")
+        frame, layout = self.panel("COMMANDOS PROFILE & QUICK CONTROLS")
         layout.addWidget(self.active_profile_panel())
-        layout.addWidget(self.power_panel())
         layout.addLayout(self.device_panels())
         layout.addWidget(self.audio_panel())
         layout.addWidget(self.service_panel())
@@ -605,11 +784,11 @@ class ControlPage(QWidget):
             ("ai", "AI / Compute", "performance"),
         ]:
             button = QPushButton(label)
-            button.clicked.connect(lambda checked=False, p=profile, power=target_power: self.set_commandos_profile(p, power))
+            button.clicked.connect(lambda checked=False, p=profile, power=target_power: self.stage_profile(p, power))
             self.profile_buttons[profile] = button
             row.addWidget(button)
         layout.addLayout(row)
-        note = QLabel("Profiles can apply multiple settings together. This base version maps profile power behavior first.")
+        note = QLabel("A CommandOS profile is a staged machine configuration. Power mode is one setting within the profile.  ·  REVERSIBLE")
         note.setObjectName("muted")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -637,24 +816,30 @@ class ControlPage(QWidget):
 
         wifi, wifi_layout = self.panel("Wi-Fi")
         wifi_layout.addWidget(self.wifi_status)
-        wifi_on = QPushButton("Turn On")
-        wifi_off = QPushButton("Turn Off")
+        wifi_on = QPushButton("ENABLE")
+        wifi_off = QPushButton("DISABLE")
+        networks = QPushButton("NETWORKS")
         wifi_on.clicked.connect(lambda: self.set_wifi(True))
         wifi_off.clicked.connect(lambda: self.set_wifi(False))
+        networks.clicked.connect(lambda: self.open_kcm("kcm_networkmanagement"))
         wifi_buttons = QHBoxLayout()
         wifi_buttons.addWidget(wifi_on)
         wifi_buttons.addWidget(wifi_off)
+        wifi_buttons.addWidget(networks)
         wifi_layout.addLayout(wifi_buttons)
 
         bluetooth, bluetooth_layout = self.panel("Bluetooth")
         bluetooth_layout.addWidget(self.bluetooth_status)
-        bt_on = QPushButton("Turn On")
-        bt_off = QPushButton("Turn Off")
+        bt_on = QPushButton("ENABLE")
+        bt_off = QPushButton("DISABLE")
+        bt_devices = QPushButton("DEVICES")
         bt_on.clicked.connect(lambda: self.set_bluetooth(True))
         bt_off.clicked.connect(lambda: self.set_bluetooth(False))
         bt_buttons = QHBoxLayout()
         bt_buttons.addWidget(bt_on)
         bt_buttons.addWidget(bt_off)
+        bt_devices.clicked.connect(lambda: self.open_kcm("kcm_bluetooth"))
+        bt_buttons.addWidget(bt_devices)
         bluetooth_layout.addLayout(bt_buttons)
 
         row.addWidget(wifi)
@@ -669,12 +854,21 @@ class ControlPage(QWidget):
 
     def service_panel(self):
         frame, layout = self.panel("Services")
+        layout.addWidget(self.service_summary)
         self.services.itemSelectionChanged.connect(self.service_selection_changed)
+        self.service_filter.setVisible(False)
+        self.services.setVisible(False)
         layout.addWidget(self.service_filter)
         layout.addWidget(self.services)
 
         row = QHBoxLayout()
-        for label, action in [("Start", "start"), ("Stop", "stop"), ("Restart", "restart"), ("Enable", "enable"), ("Disable", "disable"), ("Logs", "logs")]:
+        manage = QPushButton("MANAGE SERVICES")
+        manage.clicked.connect(self.toggle_service_manager)
+        row.addWidget(manage)
+        failed = QPushButton("FAILED ONLY")
+        failed.clicked.connect(lambda: self.show_failed_services())
+        row.addWidget(failed)
+        for label, action in [("Start", "start"), ("Stop", "stop"), ("Restart", "restart"), ("Logs", "logs")]:
             button = QPushButton(label)
             button.clicked.connect(lambda checked=False, a=action: self.service_action(a))
             row.addWidget(button)
@@ -683,6 +877,14 @@ class ControlPage(QWidget):
 
     def feature_card(self, title, body):
         frame, layout = self.panel(title)
+        frame.setProperty("searchText", f"{title} {body}".lower())
+        self.feature_cards.append(frame)
+        state = QLabel("State will appear after refresh")
+        state.setObjectName("controlState")
+        state.setWordWrap(True)
+        state.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.feature_state_labels[title] = state
+        layout.addWidget(state)
         label = QLabel(body)
         label.setObjectName("muted")
         label.setWordWrap(True)
@@ -708,6 +910,8 @@ class ControlPage(QWidget):
             "Storage & Mounting": [("Automount", "kcm", "kcm_device_automounter"), ("Block Devices", "kcm", "kcm_block_devices"), ("Partition Manager", "app", "partitionmanager")],
             "Appearance & Desktop": [("Global Theme", "kcm", "kcm_lookandfeel"), ("Colors", "kcm", "kcm_colors"), ("Wallpaper", "kcm", "kcm_wallpaper")],
             "Time, Locale & Input": [("Date & Time", "kcm", "kcm_clock"), ("Keyboard", "kcm", "kcm_keyboard"), ("Mouse", "kcm", "kcm_mouse")],
+            "Hardware & Drivers": [("System Information", "app", "kinfocenter"), ("PCI Devices", "terminal", "lspci -k"), ("Firmware", "terminal", "fwupdmgr get-devices")],
+            "Diagnostics Centre": [("Quick Scan", "terminal", "systemctl --failed; echo; df -h /; echo; free -h"), ("Boot", "terminal", "systemd-analyze; systemd-analyze critical-chain"), ("Network", "terminal", "ip -brief address; echo; ip route")],
             "Profiles": [("Gaming", "profile", "gaming"), ("AI / Compute", "profile", "ai"), ("Field", "profile", "field")],
             "Security Controls": [("Firewall", "kcm", "kcm_firewall"), ("Firmware Security", "kcm", "kcm_firmware_security"), ("Listening Ports", "terminal", "ss -tulpn")],
             "Snapshots & Recovery": [("Create Snapshot", "terminal", "sudo snapper create --description 'Command Centre manual snapshot'"), ("List Snapshots", "terminal", "snapper list"), ("Repair Packages", "terminal", "sudo pacman -Syu")],
@@ -729,11 +933,10 @@ class ControlPage(QWidget):
                 "field": ("Field", "power-saver"),
             }
             label, power = profiles[target]
-            self.set_commandos_profile(target, power)
-            self.parent_window.add_history(f"CommandOS profile button used: {label}")
+            self.stage_profile(target, power)
+            self.parent_window.add_history(f"CommandOS profile staged: {label}")
         elif action == "stage":
-            self.apply_queue.append(target)
-            self.set_result("Staged change:\n" + target + "\n\nPending queue:\n" + "\n".join(self.apply_queue))
+            self.stage_change("Power profile", "current", target.rsplit(" ", 1)[-1], target, reversible=True)
         elif action == "queue":
             self.queue_action(target)
         elif action == "history":
@@ -766,23 +969,64 @@ class ControlPage(QWidget):
         self.set_result(f"Started in {terminal}:\n{command}" if ok else terminal)
 
     def queue_action(self, action):
-        if not hasattr(self, "apply_queue"):
-            self.apply_queue = []
         if action == "show":
-            self.set_result("\n".join(self.apply_queue) or "Apply Queue is empty.")
+            self.set_result(self.queue_review_text())
         elif action == "clear":
+            if self.apply_queue and not confirm(self, "Clear Apply Queue", "Clear all staged changes?"):
+                return
             self.apply_queue = []
+            self.save_queue()
+            self.update_queue_bar()
             self.set_result("Apply Queue cleared.")
         elif action == "apply":
             if not self.apply_queue:
                 self.set_result("Apply Queue is empty.")
                 return
-            command = " && ".join(self.apply_queue)
-            if not confirm(self, "Apply Queue", f"Apply these staged changes?\n\n{chr(10).join(self.apply_queue)}"):
+            command = " && ".join(change["command"] for change in self.apply_queue)
+            review = self.queue_review_text()
+            if not confirm(self, "Apply Queue", f"Apply these staged changes?\n\n{review}"):
                 return
             self.run_terminal_action(command)
             self.parent_window.add_history(f"Applied {len(self.apply_queue)} queued change(s)")
             self.apply_queue = []
+            self.save_queue()
+            self.update_queue_bar()
+
+    def stage_change(self, label, current, proposed, command, root=False, reboot=False, reversible=False, interruption="none"):
+        self.apply_queue = [change for change in self.apply_queue if change.get("label") != label]
+        self.apply_queue.append({
+            "label": label, "current": current, "proposed": proposed, "command": command,
+            "root": root, "reboot": reboot, "reversible": reversible, "interruption": interruption,
+        })
+        self.save_queue()
+        self.update_queue_bar()
+        self.set_result(f"Staged: {label}\n{current} → {proposed}\n\n{self.queue_review_text()}")
+
+    def stage_profile(self, profile, power_profile):
+        label = profile.replace("-", " ").title()
+        current = self.parent_window.power_state().get("active", "unknown")
+        self.stage_change(f"CommandOS profile: {label}", current, power_profile,
+                          f"powerprofilesctl set {shlex.quote(power_profile)}", reversible=True)
+
+    def queue_review_text(self):
+        if not self.apply_queue:
+            return "Apply Queue is empty."
+        lines = []
+        for index, change in enumerate(self.apply_queue, 1):
+            badges = ["ROOT" if change.get("root") else "USER"]
+            if change.get("reboot"):
+                badges.append("REBOOT")
+            if change.get("reversible"):
+                badges.append("REVERSIBLE")
+            if change.get("interruption") != "none":
+                badges.append(change["interruption"].upper())
+            lines.append(f"{index}. {change['label']}  ·  {' · '.join(badges)}\n   {change['current']} → {change['proposed']}\n   {change['command']}")
+        return "\n\n".join(lines)
+
+    def update_queue_bar(self):
+        roots = sum(bool(item.get("root")) for item in self.apply_queue)
+        reboots = sum(bool(item.get("reboot")) for item in self.apply_queue)
+        self.queue_status.setText(f"{len(self.apply_queue)} PENDING CHANGES  ·  {roots} ROOT  ·  {reboots} REBOOT")
 
     def system_section(self):
         frame, layout = self.panel("System")
@@ -796,6 +1040,8 @@ class ControlPage(QWidget):
             ("Storage & Mounting", "Automount, persistent mounts, encrypted volumes, swap/zram, TRIM, removable-device policies, and cleanup."),
             ("Appearance & Desktop", "KDE theme, icons, cursor, fonts, wallpaper, accent, panels, effects, notifications, and CommandOS presets."),
             ("Time, Locale & Input", "Timezone, NTP, language, keyboard layouts, shortcuts, mouse/touchpad, touchscreen, and accessibility."),
+            ("Hardware & Drivers", "Detected hardware, kernel drivers, GPU state, firmware, PCI/USB devices, battery, SMART/NVMe health, sensors, and conflicts."),
+            ("Diagnostics Centre", "Quick, boot, graphics, network, audio, storage, and package-health scans with evidence and recommended actions."),
         ]
         for index, (title, body) in enumerate(cards):
             grid.addWidget(self.feature_card(title, body), index // 2, index % 2)
@@ -820,9 +1066,34 @@ class ControlPage(QWidget):
     def set_result(self, text):
         self.result.setPlainText(text)
 
+    def filter_controls(self, text):
+        needle = text.strip().lower()
+        for card in self.feature_cards:
+            card.setVisible(not needle or needle in card.property("searchText"))
+
+    def toggle_service_manager(self):
+        visible = not self.services.isVisible()
+        self.service_filter.setVisible(visible)
+        self.services.setVisible(visible)
+        if visible:
+            self.refresh_services()
+
+    def show_failed_services(self):
+        self.toggle_service_manager() if not self.services.isVisible() else None
+        self.service_filter.setText("failed")
+
     def refresh(self):
         power = self.parent_window.power_state()
         active = power.get("active", "unknown")
+        telemetry = self.parent_window.telemetry
+        system = self.parent_window.system
+        updates = system.get("updates")
+        reboot_required = Path("/run/reboot-required").exists()
+        self.state_header.setText(
+            f"PROFILE  {active.upper()}   ·   NETWORK  {system.get('connection', 'UNKNOWN').upper()}   ·   "
+            f"FIREWALL  {system.get('firewall', 'UNKNOWN').upper()}   ·   FAILED SERVICES  {system.get('failed', 0)}   ·   "
+            f"REBOOT  {'YES' if reboot_required else 'NO'}   ·   PENDING CHANGES  {len(self.apply_queue)}"
+        )
         for profile, button in self.power_buttons.items():
             button_active = profile == active or (profile in ("gaming", "ai-compute") and active == "performance")
             button.setProperty("active", button_active)
@@ -838,6 +1109,26 @@ class ControlPage(QWidget):
         bluetooth = self.parent_window.bluetooth_state()
         self.bluetooth_status.setText(bluetooth)
 
+        states = {
+            "Performance & Power": f"{active.upper()}  ·  CPU {metric_value(telemetry, 'cpu_frequency', '--')}  ·  {metric_value(telemetry, 'cpu_temp', '--')}°C  ·  LIVE",
+            "Graphics & Displays": f"{metric_value(telemetry, 'gpu_name', 'GPU unavailable')}  ·  {metric_value(telemetry, 'gpu_temp', '--')}°C  ·  Driver {metric_value(telemetry, 'gpu_driver', 'inspect for details')}",
+            "Network": f"{system.get('connection', 'Unknown')}  ·  {metric_value(telemetry, 'network_iface', 'offline')}  ·  VPN {metric_value(telemetry, 'vpn_status', 'unknown')}  ·  Firewall {system.get('firewall', 'Unknown')}",
+            "Startup & Boot": f"Kernel {system.get('kernel', '--')}  ·  Reboot {'required' if reboot_required else 'not required'}  ·  {system.get('failed', 0)} failed services",
+            "Users & Permissions": f"User {os.environ.get('USER', '--')}  ·  Session {os.environ.get('XDG_SESSION_TYPE', 'unknown')}  ·  Host {system.get('host', '--')}",
+            "Storage & Mounting": f"Root {metric_value(telemetry, 'storage_percent', '--')}% used  ·  {system.get('storage_health', 'UNKNOWN')}  ·  {metric_value(telemetry, 'storage_name', 'root')}",
+            "Appearance & Desktop": f"KDE Plasma  ·  {os.environ.get('XDG_SESSION_TYPE', 'unknown').title()} session  ·  LIVE · REVERSIBLE",
+            "Time, Locale & Input": f"{time.strftime('%Z · %Y-%m-%d %H:%M')}  ·  Locale {os.environ.get('LANG', 'unknown')}",
+            "Hardware & Drivers": f"Kernel {system.get('kernel', '--')}  ·  {metric_value(telemetry, 'gpu_name', 'GPU unavailable')}  ·  Firmware {'available' if command_exists('fwupdmgr') else 'tool unavailable'}",
+            "Diagnostics Centre": f"{system.get('failed', 0)} failed services  ·  {updates if updates is not None else 'Unknown'} updates  ·  Root {metric_value(telemetry, 'storage_percent', '--')}% used",
+            "Profiles": f"Active power property: {active}  ·  Changes stage into the Apply Queue",
+            "Security Controls": f"Firewall {system.get('firewall', 'Unknown')}  ·  Impact badges shown before execution",
+            "Snapshots & Recovery": f"Backend {'available' if command_exists('snapper') else 'not detected'}  ·  ROOT · REVERSIBLE when snapshot exists",
+            "Apply Queue": f"{len(self.apply_queue)} pending  ·  Persistent review and confirmation enabled",
+            "Change History": f"{len(self.parent_window.change_history)} session events recorded",
+        }
+        for title, label in self.feature_state_labels.items():
+            label.setText(states.get(title, "State unavailable"))
+
         current_sink, sinks = self.parent_window.audio_state()
         self.audio_combo.blockSignals(True)
         self.audio_combo.clear()
@@ -848,7 +1139,13 @@ class ControlPage(QWidget):
             self.audio_combo.setCurrentIndex(index)
         self.audio_combo.blockSignals(False)
 
-        self.refresh_services()
+        if self.services.isVisible():
+            self.refresh_services()
+        service_data = self.parent_window.user_services()
+        running = sum(service.get("active") == "active" for service in service_data)
+        failed_count = sum(service.get("sub") == "failed" for service in service_data)
+        self.service_summary.setText(f"{running} RUNNING  ·  {failed_count} FAILED  ·  {len(service_data)} DISCOVERED")
+        self.update_queue_bar()
 
     def refresh_services(self):
         selected = self.selected_service()
@@ -952,6 +1249,30 @@ class SoftwarePage(QWidget):
     def __init__(self, parent_window):
         super().__init__()
         self.parent_window = parent_window
+        self.software_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="software-state")
+        self.software_future = None
+        self.update_records = []
+        self.software_history = self.load_history()
+        self.health_header = QLabel("Collecting software state…")
+        self.health_header.setObjectName("healthHeader")
+        self.health_header.setWordWrap(True)
+        self.overview_status = QLabel("--")
+        self.overview_status.setObjectName("controlState")
+        self.overview_status.setWordWrap(True)
+        self.impact_status = QLabel("--")
+        self.impact_status.setObjectName("controlState")
+        self.impact_status.setWordWrap(True)
+        self.snapshot_status = QLabel("--")
+        self.snapshot_status.setObjectName("muted")
+        self.snapshot_status.setWordWrap(True)
+        self.health_status = QLabel("--")
+        self.health_status.setObjectName("muted")
+        self.health_status.setWordWrap(True)
+        self.sources_status = QLabel("--")
+        self.sources_status.setObjectName("muted")
+        self.sources_status.setWordWrap(True)
+        self.history_list = QListWidget()
+        self.update_list = QListWidget()
         self.status = QLabel("--")
         self.status.setObjectName("muted")
         self.tools_status = QLabel("--")
@@ -973,11 +1294,93 @@ class SoftwarePage(QWidget):
         title = QLabel("SOFTWARE CENTRE")
         title.setObjectName("healthHeader")
         layout.addWidget(title)
-        layout.addWidget(self.update_panel())
-        layout.addWidget(self.package_panel())
-        layout.addWidget(self.kernel_panel())
-        layout.addWidget(self.maintenance_panel())
+        layout.addWidget(self.health_header)
+        tabs = QTabWidget()
+        tabs.addTab(self.overview_panel(), "Overview")
+        tabs.addTab(self.updates_page(), "Updates")
+        tabs.addTab(self.package_panel(), "Packages")
+        tabs.addTab(self.kernel_panel(), "Kernels")
+        tabs.addTab(self.health_page(), "Health & Sources")
+        tabs.addTab(self.history_page(), "History")
+        layout.addWidget(tabs)
         layout.addWidget(self.result)
+        self.software_poll = QTimer(self)
+        self.software_poll.timeout.connect(self.finish_refresh)
+        self.software_poll.start(100)
+
+    def overview_panel(self):
+        frame, layout = self.panel("Software State")
+        layout.addWidget(self.overview_status)
+        buttons = QHBoxLayout()
+        for label, handler in [("REVIEW UPDATES", self.show_update_review), ("UPDATE ALL", self.update_system), ("RUN HEALTH CHECK", self.refresh)]:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            buttons.addWidget(button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        impact, impact_layout = self.panel("Impact Analysis")
+        impact_layout.addWidget(self.impact_status)
+        layout.addWidget(impact)
+        protection, protection_layout = self.panel("Pre-update Protection")
+        protection_layout.addWidget(self.snapshot_status)
+        snapshot = QPushButton("CREATE SNAPSHOT")
+        snapshot.clicked.connect(self.create_snapshot)
+        protection_layout.addWidget(snapshot)
+        layout.addWidget(protection)
+        return frame
+
+    def updates_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.update_panel())
+        heading = QLabel("FULL SYSTEM UPGRADE REVIEW")
+        heading.setObjectName("panelTitle")
+        layout.addWidget(heading)
+        layout.addWidget(self.update_list)
+        warning = QLabel("CommandOS follows Arch's full-upgrade model. Repository updates are reviewed together and are not selectively applied.")
+        warning.setObjectName("muted")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        return page
+
+    def health_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        health, health_layout = self.panel("Software Health")
+        health_layout.addWidget(self.health_status)
+        layout.addWidget(health)
+        sources, sources_layout = self.panel("Package Sources")
+        sources_layout.addWidget(self.sources_status)
+        layout.addWidget(sources)
+        layout.addWidget(self.maintenance_panel())
+        return page
+
+    def history_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.history_list)
+        return page
+
+    def load_history(self):
+        try:
+            data = json.loads(SOFTWARE_HISTORY_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def record_transaction(self, action, command, status="STARTED", snapshot=""):
+        self.software_history.insert(0, {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "action": action,
+                                         "command": command, "status": status, "snapshot": snapshot})
+        self.software_history = self.software_history[:100]
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        SOFTWARE_HISTORY_FILE.write_text(json.dumps(self.software_history, indent=2), encoding="utf-8")
+        self.render_history()
+
+    def render_history(self):
+        self.history_list.clear()
+        for record in self.software_history:
+            snapshot = f" · Snapshot {record['snapshot']}" if record.get("snapshot") else ""
+            self.history_list.addItem(f"{record.get('timestamp', '--')}  ·  {record.get('action', 'Software action')}  ·  {record.get('status', 'UNKNOWN')}{snapshot}\n{record.get('command', '')}")
 
     def panel(self, title):
         frame = QFrame()
@@ -1056,7 +1459,6 @@ class SoftwarePage(QWidget):
             ("Remove Selected", self.remove_selected_kernel),
             ("Rebuild Initramfs", self.rebuild_initramfs),
             ("Update GRUB", self.update_grub),
-            ("Install CachyOS GUI", self.install_kernel_gui),
         ]:
             button = QPushButton(label)
             button.clicked.connect(handler)
@@ -1074,9 +1476,9 @@ class SoftwarePage(QWidget):
 
         row = QHBoxLayout()
         for label, command in [
-            ("Clean Package Cache", "sudo pacman -Sc"),
-            ("Refresh Databases", "sudo pacman -Syy"),
-            ("Repair Keyring", "sudo pacman-key --refresh-keys"),
+            ("Review Package Cache", "du -sh /var/cache/pacman/pkg; echo; paccache -dk3 2>/dev/null || true"),
+            ("Check Dependencies", "pacman -Dk; echo; pacman -Qk 2>/dev/null | grep -v ' 0 missing files' | head -80 || true"),
+            ("Inspect Keyring", "pacman-key --list-keys >/dev/null && echo 'Keyring is readable' || echo 'Keyring check failed'"),
             ("List Orphans", "pacman -Qtdq || true"),
         ]:
             button = QPushButton(label)
@@ -1087,34 +1489,103 @@ class SoftwarePage(QWidget):
         return frame
 
     def refresh(self):
-        self.refresh_tools_status()
-        self.refresh_kernels()
+        if self.software_future is None:
+            self.health_header.setText("SOFTWARE STATE  ·  CHECKING…")
+            self.software_future = self.software_executor.submit(self.collect_software_state)
+
+    def collect_software_state(self):
         repo_updates = []
         aur_updates = []
-
         if command_exists("checkupdates"):
             output = run_text(["checkupdates"], 8)[0]
             repo_updates = [line for line in output.splitlines() if line.strip()]
-
         if command_exists("yay"):
             output = run_text(["yay", "-Qua"], 10)[0]
             aur_updates = [line for line in output.splitlines() if line.strip()]
         elif command_exists("paru"):
             output = run_text(["paru", "-Qua"], 10)[0]
             aur_updates = [line for line in output.splitlines() if line.strip()]
+        flatpak_updates = self.live_lines(["flatpak", "remote-ls", "--updates", "--columns=application,version"], 12) if command_exists("flatpak") else []
+        orphans = self.live_lines(["pacman", "-Qtdq"], 8) if command_exists("pacman") else []
+        foreign = self.live_lines(["pacman", "-Qqm"], 8) if command_exists("pacman") else []
+        cache_size = run_text(["du", "-sh", "/var/cache/pacman/pkg"], 4)[0].split("\t", 1)[0] or "unknown"
+        lock_state = "PRESENT" if Path("/var/lib/pacman/db.lck").exists() else "CLEAR"
+        snapshot = self.snapshot_state()
+        return {"repo": repo_updates, "aur": aur_updates, "flatpak": flatpak_updates, "orphans": orphans,
+                "foreign": foreign, "cache": cache_size, "lock": lock_state, "snapshot": snapshot,
+                "reboot": Path("/run/reboot-required").exists(), "kernel": run_text(["uname", "-r"], 2)[0]}
 
-        total = len(repo_updates) + len(aur_updates)
-        self.status.setText(f"Available updates: {total} ({len(repo_updates)} repo, {len(aur_updates)} AUR)")
+    def live_lines(self, command, timeout):
+        output, _, code = run_text(command, timeout)
+        return [line for line in output.splitlines() if line.strip()] if code == 0 else []
 
-        preview = []
-        if repo_updates:
-            preview.append("Repository updates:")
-            preview.extend(repo_updates[:20])
-        if aur_updates:
-            preview.append("")
-            preview.append("AUR updates:")
-            preview.extend(aur_updates[:20])
-        self.result.setPlainText("\n".join(preview) if preview else "No updates reported by available tools.")
+    def snapshot_state(self):
+        if command_exists("snapper"):
+            configs = run_text(["snapper", "list-configs"], 4)[0]
+            configured = len([line for line in configs.splitlines() if "|" in line and not line.lstrip().startswith("Config")]) > 0
+            return {"backend": "Snapper", "configured": configured}
+        if command_exists("timeshift"):
+            return {"backend": "Timeshift", "configured": True}
+        return {"backend": "None detected", "configured": False}
+
+    def finish_refresh(self):
+        if self.software_future is None or not self.software_future.done():
+            return
+        future = self.software_future
+        self.software_future = None
+        try:
+            state = future.result()
+        except Exception as error:
+            self.health_header.setText(f"SOFTWARE STATE  ·  CHECK FAILED: {error}")
+            return
+        self.render_software_state(state)
+
+    def render_software_state(self, state):
+        self.update_records = self.parse_update_records(state["repo"], "OFFICIAL") + self.parse_update_records(state["aur"], "AUR")
+        total = len(self.update_records)
+        high = sum(record["impact"] == "HIGH" for record in self.update_records)
+        medium = sum(record["impact"] == "MEDIUM" for record in self.update_records)
+        low = total - high - medium
+        attention = total or state["orphans"] or state["lock"] != "CLEAR"
+        self.health_header.setText(f"SYSTEM  {'ATTENTION' if attention else 'HEALTHY'}  ·  UPDATES  {total}  ·  AUR  {len(state['aur'])}  ·  FLATPAK  {len(state['flatpak'])}  ·  ORPHANS  {len(state['orphans'])}  ·  REBOOT  {'YES' if state['reboot'] else 'NO'}")
+        self.status.setText(f"{total} system updates ({len(state['repo'])} official, {len(state['aur'])} AUR) · {len(state['flatpak'])} Flatpak")
+        self.overview_status.setText(f"UPDATES          {total}\nAUR              {len(state['aur'])}\nFLATPAK          {len(state['flatpak'])}\nORPHANS          {len(state['orphans'])}\nFOREIGN          {len(state['foreign'])}\nREBOOT REQUIRED  {'YES' if state['reboot'] else 'NO'}")
+        self.impact_status.setText(f"LOW IMPACT  {low}  ·  MEDIUM IMPACT  {medium}  ·  HIGH IMPACT  {high}\nHigh impact indicates core system, kernel, driver, boot, or filesystem packages; it is not a prediction of failure.")
+        snapshot = state["snapshot"]
+        self.snapshot_status.setText(f"BACKEND  {snapshot['backend']}\nCONFIGURATION  {'READY' if snapshot['configured'] else 'NOT READY'}\nROLLBACK  {'POTENTIALLY AVAILABLE' if snapshot['configured'] else 'NOT CONFIRMED'}\nRECOMMENDATION  {'CREATE SNAPSHOT BEFORE HIGH-IMPACT UPDATE' if high else 'OPTIONAL'}")
+        self.health_status.setText(f"PACKAGE DATABASE     {'LOCKED' if state['lock'] != 'CLEAR' else 'ACCESSIBLE'}\nPACMAN LOCK          {state['lock']}\nPACKAGE CACHE        {state['cache']}\nORPHANS              {len(state['orphans'])}\nFOREIGN PACKAGES     {len(state['foreign'])}\nRUNNING KERNEL       {state['kernel']}")
+        self.sources_status.setText(f"PACMAN       {'AVAILABLE' if command_exists('pacman') else 'MISSING'}\nAUR HELPER   {('YAY' if command_exists('yay') else 'PARU' if command_exists('paru') else 'NONE')}\nFLATPAK      {'AVAILABLE' if command_exists('flatpak') else 'MISSING'}\nSNAPSHOTS    {snapshot['backend']} · {'READY' if snapshot['configured'] else 'NOT CONFIGURED'}")
+        self.update_list.clear()
+        for record in sorted(self.update_records, key=lambda item: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[item["impact"]]):
+            self.update_list.addItem(f"{record['name'].upper()}  ·  {record['impact']} IMPACT  ·  {record['source']}\n{record['current']} → {record['new']}\n{record['reason']}")
+        for row in state["flatpak"]:
+            self.update_list.addItem(f"FLATPAK  ·  LOW IMPACT\n{row}")
+        self.render_history()
+        self.refresh_tools_status()
+
+    def parse_update_records(self, rows, source):
+        high_names = {"linux", "linux-cachyos", "nvidia", "nvidia-utils", "mesa", "systemd", "glibc", "grub", "mkinitcpio", "btrfs-progs", "pacman", "linux-firmware"}
+        medium_prefixes = ("qt6-", "plasma-", "pipewire", "openssl", "python", "gcc")
+        records = []
+        for row in rows:
+            parts = row.split()
+            name = parts[0] if parts else row
+            current = parts[1] if len(parts) > 1 else "installed"
+            new = parts[3] if len(parts) > 3 and parts[2] in ("->", "→") else parts[2] if len(parts) > 2 else "available"
+            if name in high_names or name.startswith(("linux-", "nvidia-")):
+                impact, reason = "HIGH", "Core system, kernel, graphics, boot, or filesystem component. Reboot or snapshot may be appropriate."
+            elif name.startswith(medium_prefixes):
+                impact, reason = "MEDIUM", "Shared platform component with multiple consumers."
+            else:
+                impact, reason = "LOW", "Application or leaf-package update based on package-name classification."
+            records.append({"name": name, "current": current, "new": new, "source": source, "impact": impact, "reason": reason})
+        return records
+
+    def show_update_review(self):
+        if not self.update_records:
+            self.result.setPlainText("No system updates are currently available, or the state check has not completed.")
+            return
+        self.result.setPlainText("\n\n".join(f"{item['name']}  {item['current']} → {item['new']}\n{item['impact']} IMPACT · {item['source']}\n{item['reason']}" for item in self.update_records))
 
     def refresh_tools_status(self):
         tools = []
@@ -1184,6 +1655,7 @@ class SoftwarePage(QWidget):
         if not confirm(self, "Install Kernel", f"Install this kernel?\n\n{package}\n\nCommand:\n{command}"):
             return
         if self.terminal_command(f"Install Kernel {package}", command):
+            self.record_transaction(f"Kernel installation: {package}", command)
             self.parent_window.add_history(f"Kernel install started: {package}")
 
     def remove_selected_kernel(self):
@@ -1191,14 +1663,19 @@ class SoftwarePage(QWidget):
         if not package:
             self.result.setPlainText("Select an installed kernel first.")
             return
+        if self.installed_kernels.count() <= 1:
+            self.result.setPlainText("Refusing to remove the only detected installed kernel. Install and verify a fallback kernel first.")
+            return
         running = run_text(["uname", "-r"], 2)[0]
-        if package in running:
+        running_base = re.sub(r"-\d+(?:\.\d+)*.*$", "", running)
+        if package == running_base or package in running:
             self.result.setPlainText("Refusing to remove the currently running kernel.")
             return
         command = f"sudo chwd-kernel --remove {shlex.quote(package)}"
         if not confirm(self, "Remove Kernel", f"Remove this installed kernel?\n\n{package}\n\nCommand:\n{command}"):
             return
         if self.terminal_command(f"Remove Kernel {package}", command):
+            self.record_transaction(f"Kernel removal: {package}", command)
             self.parent_window.add_history(f"Kernel removal started: {package}")
 
     def rebuild_initramfs(self):
@@ -1206,6 +1683,7 @@ class SoftwarePage(QWidget):
         if not confirm(self, "Rebuild Initramfs", f"Rebuild initramfs for all kernels?\n\nCommand:\n{command}"):
             return
         if self.terminal_command("Rebuild Initramfs", command):
+            self.record_transaction("Rebuild initramfs", command)
             self.parent_window.add_history("Initramfs rebuild started")
 
     def update_grub(self):
@@ -1213,6 +1691,7 @@ class SoftwarePage(QWidget):
         if not confirm(self, "Update GRUB", f"Regenerate GRUB configuration?\n\nCommand:\n{command}"):
             return
         if self.terminal_command("Update GRUB", command):
+            self.record_transaction("Regenerate GRUB configuration", command)
             self.parent_window.add_history("GRUB update started")
 
     def install_kernel_gui(self):
@@ -1231,9 +1710,11 @@ class SoftwarePage(QWidget):
 
     def update_system(self):
         command = self.update_command()
+        snapshot = self.snapshot_state()
         message = (
             "Run a full system update in a terminal?\n\n"
             f"Command:\n{command}\n\n"
+            f"Snapshot protection: {snapshot['backend']} · {'READY' if snapshot['configured'] else 'NOT CONFIRMED'}\n\n"
             "The terminal will handle password prompts and package confirmations."
         )
         if not confirm(self, "Update System", message):
@@ -1249,8 +1730,25 @@ class SoftwarePage(QWidget):
         ok, terminal = launch_terminal("Command Centre Update", terminal_command)
         if ok:
             self.result.setPlainText(f"Started system update in {terminal}.\n\n{command}")
+            self.record_transaction("Full system upgrade", command)
         else:
             self.result.setPlainText(terminal)
+
+    def create_snapshot(self):
+        snapshot = self.snapshot_state()
+        if not snapshot["configured"]:
+            self.result.setPlainText("No configured Snapper or Timeshift backend was confirmed. Configure snapshots in System Control before relying on rollback.")
+            return
+        stamp = time.strftime("command-centre-pre-update-%Y%m%d-%H%M")
+        if snapshot["backend"] == "Snapper":
+            command = f"sudo snapper create --description {shlex.quote(stamp)}"
+        else:
+            command = f"sudo timeshift --create --comments {shlex.quote(stamp)}"
+        if not confirm(self, "Create Pre-update Snapshot", f"Create a pre-update snapshot?\n\nBackend: {snapshot['backend']}\nCommand:\n{command}"):
+            return
+        if self.terminal_command("Command Centre Pre-update Snapshot", command):
+            self.record_transaction("Pre-update snapshot", command, snapshot=stamp)
+            self.parent_window.add_history("Pre-update snapshot started")
 
     def terminal_command(self, title, command):
         terminal_command = (
@@ -1272,6 +1770,7 @@ class SoftwarePage(QWidget):
         if not confirm(self, "Update Flatpaks", f"Run Flatpak updates?\n\nCommand:\n{command}"):
             return
         if self.terminal_command("Command Centre Flatpak Update", command):
+            self.record_transaction("Flatpak update", command)
             self.parent_window.add_history("Flatpak update started")
 
     def search_packages(self):
@@ -1370,7 +1869,11 @@ class SoftwarePage(QWidget):
         if not confirm(self, label, f"Run this maintenance command in a terminal?\n\n{command}"):
             return
         if self.terminal_command(f"Command Centre - {label}", command):
+            self.record_transaction(f"Software health: {label}", command)
             self.parent_window.add_history(f"Software maintenance started: {label}")
+
+    def shutdown(self):
+        self.software_executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ToolLibraryPage(QWidget):
@@ -1379,21 +1882,22 @@ class ToolLibraryPage(QWidget):
         self.parent_window = parent_window
         self.tools = []
         self.filtered_tools = []
+        self.metadata, self.collections = self.load_metadata()
+        self.tools = [self.metadata_entry(tool_id, info) for tool_id, info in self.metadata.items()]
+        self.tool_state = self.load_tool_state()
+        self.inventory_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tool-inventory")
+        self.inventory_future = None
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search installed packages, Flatpaks, launchers, and executable tools")
+        self.search.setPlaceholderText("Search tools, capabilities and tasks — e.g. inspect image metadata")
         self.search.textChanged.connect(self.render_tools)
-        self.kind_filter = QComboBox()
-        for label, value in [
-            ("All", "all"),
-            ("Packages", "package"),
-            ("AUR / Foreign", "aur"),
-            ("Flatpaks", "flatpak"),
-            ("Desktop Apps", "desktop"),
-            ("Executables", "executable"),
-            ("Curated", "curated"),
-        ]:
-            self.kind_filter.addItem(label, value)
-        self.kind_filter.currentIndexChanged.connect(self.render_tools)
+        self.view_mode = QComboBox()
+        self.view_mode.addItem("LIBRARY", "library")
+        self.view_mode.addItem("COLLECTIONS", "collections")
+        self.view_mode.addItem("INVENTORY", "inventory")
+        self.view_mode.currentIndexChanged.connect(self.view_changed)
+        self.categories = QListWidget()
+        self.categories.setFixedWidth(210)
+        self.categories.itemSelectionChanged.connect(self.render_tools)
         self.list = QListWidget()
         self.list.itemSelectionChanged.connect(self.selection_changed)
         self.detail = QTextEdit()
@@ -1404,9 +1908,14 @@ class ToolLibraryPage(QWidget):
         self.result.setObjectName("textPanel")
         self.status = QLabel("--")
         self.status.setObjectName("muted")
+        self.favorite_button = QPushButton("☆ FAVORITE")
+        self.favorite_button.clicked.connect(self.toggle_favorite)
         self.auto_refresh = QTimer(self)
         self.auto_refresh.timeout.connect(self.refresh_if_changed)
         self.auto_refresh.start(60000)
+        self.inventory_poll = QTimer(self)
+        self.inventory_poll.timeout.connect(self.finish_inventory_refresh)
+        self.inventory_poll.start(100)
 
         layout = QVBoxLayout(self)
         title = QLabel("TOOL LIBRARY")
@@ -1415,14 +1924,15 @@ class ToolLibraryPage(QWidget):
         layout.addWidget(self.status)
 
         controls = QHBoxLayout()
+        controls.addWidget(self.view_mode)
         controls.addWidget(self.search, 1)
-        controls.addWidget(self.kind_filter)
         refresh = QPushButton("Refresh Library")
         refresh.clicked.connect(self.refresh)
         controls.addWidget(refresh)
         layout.addLayout(controls)
 
         split = QSplitter(Qt.Horizontal)
+        split.addWidget(self.categories)
         split.addWidget(self.list)
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -1437,28 +1947,66 @@ class ToolLibraryPage(QWidget):
             button = QPushButton(label)
             button.clicked.connect(handler)
             actions.addWidget(button)
+        actions.addWidget(self.favorite_button)
         actions.addStretch()
         right_layout.addLayout(actions)
         right_layout.addWidget(self.result)
         split.addWidget(right)
-        split.setSizes([420, 650])
+        split.setSizes([190, 390, 610])
         layout.addWidget(split, 1)
+        self.populate_categories()
+        self.render_tools()
         self.refresh()
 
+    def load_metadata(self):
+        try:
+            data = json.loads(CURATED_TOOLS_FILE.read_text(encoding="utf-8"))
+            tools = {tool["id"]: tool for tool in data.get("tools", [])}
+            return tools, data.get("collections", [])
+        except Exception:
+            return {}, []
+
+    def metadata_entry(self, tool_id, info):
+        command = info.get("command", "")
+        return {
+            "key": f"curated:{tool_id}", "id": tool_id, "name": info.get("name", tool_id),
+            "package": info.get("package", tool_id), "command": command, "kind": "curated",
+            "group": info.get("category", "Uncategorized"), "description": info.get("purpose", ""),
+            "installed": bool(command and command_exists(command.split()[0])), "metadata": info,
+        }
+
+    def load_tool_state(self):
+        try:
+            data = json.loads(TOOL_STATE_FILE.read_text(encoding="utf-8"))
+            return {"favorites": data.get("favorites", []), "recent": data.get("recent", [])}
+        except Exception:
+            return {"favorites": [], "recent": []}
+
+    def save_tool_state(self):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        TOOL_STATE_FILE.write_text(json.dumps(self.tool_state, indent=2), encoding="utf-8")
+
     def refresh(self):
-        self.tools = self.build_library()
+        if self.inventory_future is None:
+            self.status.setText(f"{len(self.metadata)} curated tools ready · inventory scanning in background…")
+            self.inventory_future = self.inventory_executor.submit(self.build_library)
+
+    def finish_inventory_refresh(self):
+        if self.inventory_future is None or not self.inventory_future.done():
+            return
+        future = self.inventory_future
+        self.inventory_future = None
+        try:
+            self.tools = future.result()
+        except Exception as error:
+            self.result.setPlainText(f"Inventory refresh failed: {error}")
+            return
+        self.populate_categories()
         self.render_tools()
-        self.result.setPlainText("Tool Library refreshed from the live system.")
+        self.result.setPlainText("Curated Library merged with the live system inventory.")
 
     def refresh_if_changed(self):
-        updated = self.build_library()
-        old_signature = {(tool["key"], tool.get("command", "")) for tool in self.tools}
-        new_signature = {(tool["key"], tool.get("command", "")) for tool in updated}
-        if old_signature == new_signature:
-            return
-        self.tools = updated
-        self.render_tools()
-        self.result.setPlainText("Tool Library auto-refreshed after installed apps/tools changed.")
+        self.refresh()
 
     def live_command_lines(self, command, timeout=12):
         output, _, code = run_text(command, timeout)
@@ -1483,15 +2031,19 @@ class ToolLibraryPage(QWidget):
 
     def curated_descriptions(self):
         descriptions = {}
+        for info in self.metadata.values():
+            descriptions[info.get("package", info["id"])] = info
+            descriptions[info.get("command", info["id"])] = info
         for group, tools in TOOL_GROUPS:
             for name, command, description, package in tools:
-                descriptions[package] = {
+                descriptions.setdefault(package, {
+                    "id": command,
                     "name": name,
                     "command": command,
                     "description": description,
                     "package": package,
                     "group": group,
-                }
+                })
                 descriptions[command] = descriptions[package]
         return descriptions
 
@@ -1504,6 +2056,7 @@ class ToolLibraryPage(QWidget):
         desktop_apps = self.live_desktop_apps()
         tools = []
         seen = set()
+        represented_ids = set()
 
         for package in explicit:
             info = curated.get(package, {})
@@ -1512,15 +2065,19 @@ class ToolLibraryPage(QWidget):
             tools.append(
                 {
                     "key": f"{kind}:{package}",
+                    "id": info.get("id", package),
                     "name": info.get("name") or package,
                     "package": package,
                     "command": command,
                     "kind": kind,
-                    "group": info.get("group") or ("AUR / Foreign" if kind == "aur" else "Installed Package"),
-                    "description": info.get("description") or f"Installed package from {'AUR/foreign source' if kind == 'aur' else 'pacman repositories'}.",
+                    "group": info.get("category") or info.get("group") or ("AUR / Foreign" if kind == "aur" else "Installed Package"),
+                    "description": info.get("purpose") or info.get("description") or f"Installed package from {'AUR/foreign source' if kind == 'aur' else 'pacman repositories'}.",
                     "installed": True,
+                    "metadata": info,
                 }
             )
+            if info:
+                represented_ids.add(info.get("id", package))
             seen.add(command or package)
 
         for row in flatpaks:
@@ -1531,6 +2088,7 @@ class ToolLibraryPage(QWidget):
             tools.append(
                 {
                     "key": f"flatpak:{app_id}",
+                    "id": app_id,
                     "name": name,
                     "package": app_id,
                     "command": f"flatpak run {shlex.quote(app_id)}",
@@ -1538,6 +2096,7 @@ class ToolLibraryPage(QWidget):
                     "group": "Flatpak",
                     "description": f"Flatpak application{f' version {version}' if version else ''}.",
                     "installed": True,
+                    "metadata": {},
                 }
             )
 
@@ -1550,6 +2109,7 @@ class ToolLibraryPage(QWidget):
             tools.append(
                 {
                     "key": f"desktop:{key_name}",
+                    "id": key_name,
                     "name": desktop.get("name") or key_name,
                     "package": executable or desktop.get("desktop_id") or key_name,
                     "desktop_id": desktop.get("desktop_id", ""),
@@ -1558,6 +2118,7 @@ class ToolLibraryPage(QWidget):
                     "group": "Desktop App",
                     "description": desktop.get("description") or "Installed desktop launcher discovered from application entries.",
                     "installed": True,
+                    "metadata": {},
                 }
             )
             if executable:
@@ -1570,15 +2131,32 @@ class ToolLibraryPage(QWidget):
             tools.append(
                 {
                     "key": f"executable:{command}",
+                    "id": info.get("id", command),
                     "name": info.get("name") or command,
                     "package": info.get("package") or command,
                     "command": command,
                     "kind": "curated" if info else "executable",
-                    "group": info.get("group") or "Executable Tool",
-                    "description": info.get("description") or "Executable command found in /usr/bin, /usr/local/bin, or ~/.local/bin.",
+                    "group": info.get("category") or info.get("group") or "Executable Tool",
+                    "description": info.get("purpose") or info.get("description") or "Executable command found in /usr/bin, /usr/local/bin, or ~/.local/bin.",
                     "installed": True,
+                    "metadata": info,
                 }
             )
+            if info:
+                represented_ids.add(info.get("id", command))
+
+        for tool_id, info in self.metadata.items():
+            if tool_id in represented_ids:
+                continue
+            command = info.get("command", "")
+            installed = bool(command and command_exists(command.split()[0]))
+            tools.append({
+                "key": f"curated:{tool_id}", "id": tool_id, "name": info["name"],
+                "package": info.get("package", tool_id), "command": command,
+                "kind": "curated", "group": info.get("category", "Uncategorized"),
+                "description": info.get("purpose", "Curated CommandOS tool."),
+                "installed": installed, "metadata": info,
+            })
 
         tools.sort(key=lambda item: (item["group"], item["name"].lower()))
         return tools
@@ -1637,17 +2215,89 @@ class ToolLibraryPage(QWidget):
         command = re.sub(r"\s+%[fFuUdDnNickvm]", "", exec_line).strip()
         return {"desktop_id": file_path.name, "name": name, "command": command, "description": comment}
 
+    def view_changed(self):
+        self.populate_categories()
+        self.render_tools()
+
+    def populate_categories(self):
+        selected = self.selected_category()
+        self.categories.blockSignals(True)
+        self.categories.clear()
+        mode = self.view_mode.currentData() if hasattr(self, "view_mode") else "library"
+        values = []
+        if mode == "library":
+            values = [("ALL CURATED TOOLS", "all"), ("★  FAVORITES", "favorites"), ("◷  RECENT", "recent"), ("COMMANDOS RECOMMENDED", "recommended")]
+            counts = {}
+            for info in self.metadata.values():
+                category = info.get("category", "Uncategorized")
+                counts[category] = counts.get(category, 0) + 1
+            values.extend((f"{category.upper()}  {count}", category) for category, count in sorted(counts.items()))
+        elif mode == "collections":
+            values = [("ALL COLLECTIONS", "all")]
+        else:
+            values = [("ALL INVENTORY", "all"), ("PACKAGES", "package"), ("AUR / FOREIGN", "aur"), ("FLATPAKS", "flatpak"), ("DESKTOP APPS", "desktop"), ("EXECUTABLES", "executable")]
+        for label, value in values:
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, value)
+            self.categories.addItem(item)
+            if value == selected:
+                item.setSelected(True)
+        if not self.categories.selectedItems() and self.categories.count():
+            self.categories.item(0).setSelected(True)
+        self.categories.blockSignals(False)
+
+    def selected_category(self):
+        if not hasattr(self, "categories"):
+            return "all"
+        selected = self.categories.selectedItems()
+        return selected[0].data(Qt.UserRole) if selected else "all"
+
     def render_tools(self):
         selected_key = self.selected_tool().get("key") if self.selected_tool() else ""
         needle = self.search.text().strip().lower()
-        kind = self.kind_filter.currentData() or "all"
+        mode = self.view_mode.currentData() or "library"
+        category = self.selected_category()
         self.list.clear()
         self.filtered_tools = []
+        if mode == "collections":
+            for collection in self.collections:
+                haystack = f"{collection.get('name')} {collection.get('description')} {' '.join(collection.get('tools', []))}".lower()
+                if needle and needle not in haystack:
+                    continue
+                members = [self.tool_by_id(tool_id) for tool_id in collection.get("tools", [])]
+                installed = sum(bool(tool and tool.get("installed")) for tool in members)
+                tool = {"key": f"collection:{collection['id']}", "id": collection["id"], "name": collection["name"],
+                        "kind": "collection", "group": "Collection", "description": collection.get("description", ""),
+                        "command": "", "package": "", "installed": installed == len(members), "collection": collection,
+                        "metadata": {}}
+                self.filtered_tools.append(tool)
+                item = QListWidgetItem(f"{tool['name'].upper()}\n{installed} / {len(members)} INSTALLED  ·  {tool['description']}")
+                item.setData(Qt.UserRole, tool)
+                self.list.addItem(item)
+            self.status.setText(f"{len(self.filtered_tools)} collections · reviewed installation plans required")
+            if self.list.count():
+                self.list.item(0).setSelected(True)
+            self.selection_changed()
+            return
         for tool in self.tools:
-            haystack = f"{tool['name']} {tool['package']} {tool['command']} {tool['group']} {tool['description']}".lower()
+            metadata = tool.get("metadata", {})
+            haystack = " ".join([tool["name"], tool["package"], tool["command"], tool["group"], tool["description"],
+                                 " ".join(metadata.get("capabilities", [])), " ".join(metadata.get("tasks", [])),
+                                 " ".join(metadata.get("integrations", []))]).lower()
             if needle and needle not in haystack:
                 continue
-            if kind != "all" and tool["kind"] != kind:
+            if mode == "library":
+                if tool.get("id") not in self.metadata:
+                    continue
+                if category == "favorites" and tool.get("id") not in self.tool_state["favorites"]:
+                    continue
+                if category == "recent" and tool.get("id") not in self.tool_state["recent"]:
+                    continue
+                if category == "recommended" and not metadata.get("recommended"):
+                    continue
+                if category not in ("all", "favorites", "recent", "recommended") and tool["group"] != category:
+                    continue
+            elif category != "all" and tool["kind"] != category:
                 continue
             self.filtered_tools.append(tool)
             item = QListWidgetItem(self.item_label(tool))
@@ -1657,12 +2307,20 @@ class ToolLibraryPage(QWidget):
                 item.setSelected(True)
         if not self.list.selectedItems() and self.list.count():
             self.list.item(0).setSelected(True)
-        self.status.setText(f"{len(self.filtered_tools)} shown / {len(self.tools)} live library entries loaded.")
+        installed_curated = sum(tool.get("installed") and tool.get("id") in self.metadata for tool in self.tools)
+        self.status.setText(f"{len(self.metadata)} curated tools · {installed_curated} installed · {len(self.filtered_tools)} shown · {len(self.tools)} inventory entries")
         self.selection_changed()
 
     def item_label(self, tool):
-        command = tool["command"] or "no launch command detected"
-        return f"{tool['name']}  [{tool['group']}]\n{command}"
+        metadata = tool.get("metadata", {})
+        state = "● INSTALLED" if tool.get("installed") else "○ AVAILABLE"
+        badges = [state, metadata.get("type", tool.get("kind", "tool")).upper(), tool["group"].upper()]
+        if metadata.get("recommended"):
+            badges.append("COMMANDOS RECOMMENDED")
+        return f"{tool['name'].upper()}\n{tool['description']}\n{'  ·  '.join(badges)}"
+
+    def tool_by_id(self, tool_id):
+        return next((tool for tool in self.tools if tool.get("id") == tool_id), None)
 
     def selected_tool(self):
         selected = self.list.selectedItems()
@@ -1672,8 +2330,32 @@ class ToolLibraryPage(QWidget):
         tool = self.selected_tool()
         if not tool:
             self.detail.setPlainText("Select a tool.")
+            self.favorite_button.setEnabled(False)
             return
         self.detail.setPlainText(self.guide_text(tool))
+        self.favorite_button.setEnabled(tool.get("kind") != "collection" and tool.get("id") in self.metadata)
+        favorite = tool.get("id") in self.tool_state["favorites"]
+        self.favorite_button.setText("★ FAVORITE" if favorite else "☆ FAVORITE")
+
+    def toggle_favorite(self):
+        tool = self.selected_tool()
+        if not tool or tool.get("id") not in self.metadata:
+            return
+        tool_id = tool["id"]
+        if tool_id in self.tool_state["favorites"]:
+            self.tool_state["favorites"].remove(tool_id)
+        else:
+            self.tool_state["favorites"].append(tool_id)
+        self.save_tool_state()
+        self.selection_changed()
+
+    def record_recent(self, tool):
+        tool_id = tool.get("id")
+        if tool_id not in self.metadata:
+            return
+        recent = [item for item in self.tool_state["recent"] if item != tool_id]
+        self.tool_state["recent"] = [tool_id, *recent][:30]
+        self.save_tool_state()
 
     def launch_selected_tool(self):
         tool = self.selected_tool()
@@ -1691,6 +2373,7 @@ class ToolLibraryPage(QWidget):
             self.result.setPlainText(f"{command} is not available.")
             return
         self.result.setPlainText(f"Launched {tool['name']}.\n{command}")
+        self.record_recent(tool)
         self.parent_window.add_history(f"Tool launched: {tool['name']}")
 
     def open_selected_terminal(self):
@@ -1706,11 +2389,15 @@ class ToolLibraryPage(QWidget):
         )
         ok, terminal = launch_terminal(f"Command Centre - {tool['name']}", shell_command)
         self.result.setPlainText(f"Started {tool['name']} in {terminal}." if ok else terminal)
+        self.record_recent(tool)
         self.parent_window.add_history(f"Tool terminal opened: {tool['name']}")
 
     def install_selected_tool(self):
         tool = self.selected_tool()
         if not tool:
+            return
+        if tool.get("kind") == "collection":
+            self.review_collection_install(tool)
             return
         command = self.install_command(tool)
         if not command:
@@ -1727,6 +2414,27 @@ class ToolLibraryPage(QWidget):
         ok, terminal = launch_terminal(f"Install {tool['name']}", shell_command)
         self.result.setPlainText(f"Started install in {terminal}:\n{command}" if ok else terminal)
         self.parent_window.add_history(f"Tool install started: {tool['name']}")
+
+    def review_collection_install(self, tool):
+        collection = tool["collection"]
+        missing = [self.tool_by_id(tool_id) for tool_id in collection.get("tools", [])]
+        missing = [member for member in missing if member and not member.get("installed")]
+        if not missing:
+            self.result.setPlainText(f"{collection['name']} is complete; every curated tool is installed.")
+            return
+        commands = [self.install_command(member) for member in missing]
+        commands = [command for command in commands if command]
+        review = "\n".join(f"• {member['name']} ({member['package']})" for member in missing)
+        command = " && ".join(commands)
+        if not command:
+            self.result.setPlainText(f"Missing tools:\n{review}\n\nNo supported installer is available.")
+            return
+        if not confirm(self, "Install Collection Tools", f"Review missing tools for {collection['name']}:\n\n{review}\n\nCombined command:\n{command}"):
+            return
+        ok, terminal = launch_terminal(f"Install {collection['name']}", command)
+        self.result.setPlainText(f"Started reviewed collection install in {terminal}." if ok else terminal)
+        if ok:
+            self.parent_window.add_history(f"Collection install started: {collection['name']}")
 
     def install_command(self, tool):
         if tool["kind"] == "flatpak":
@@ -1759,7 +2467,19 @@ class ToolLibraryPage(QWidget):
         dialog.exec()
 
     def guide_text(self, tool):
+        if tool.get("kind") == "collection":
+            collection = tool["collection"]
+            members = [self.tool_by_id(tool_id) for tool_id in collection.get("tools", [])]
+            lines = []
+            for member in members:
+                if member:
+                    lines.append(f"{'✓' if member.get('installed') else '○'}  {member['name']}  ·  {'INSTALLED' if member.get('installed') else 'AVAILABLE'}")
+            installed = sum(bool(member and member.get("installed")) for member in members)
+            return (f"{collection['name'].upper()}\n{'=' * len(collection['name'])}\n\n{collection.get('description', '')}\n\n"
+                    f"COLLECTION HEALTH\n{installed} / {len(members)} tools installed\n\nTOOLS\n" + "\n".join(lines) +
+                    "\n\nINSTALLATION\nSelect Install to review every missing package and the combined command before anything is started.")
         command = tool["command"] or tool["package"]
+        metadata = tool.get("metadata", {})
         executable = command.split()[0] if command else ""
         install = self.install_command(tool) or "No supported install command detected."
         help_commands = []
@@ -1776,22 +2496,22 @@ class ToolLibraryPage(QWidget):
                 f"{executable} --version",
                 f"pacman -Qi {tool['package']}",
             ]
+        capabilities = "\n".join(f"• {value}" for value in metadata.get("capabilities", [])) or "• General package or executable entry"
+        integrations = "\n".join(f"✓ {value}" for value in metadata.get("integrations", [])) or "No CommandOS integration declared."
+        related = [self.metadata[item]["name"] for item in metadata.get("related_tools", []) if item in self.metadata]
+        state = "INSTALLED · HEALTHY" if tool.get("installed") else "AVAILABLE · NOT INSTALLED"
         return (
-            f"{tool['name']}\n"
+            f"{tool['name'].upper()}\n"
             f"{'=' * len(tool['name'])}\n\n"
-            f"Group: {tool['group']}\n"
-            f"Type: {tool['kind']}\n"
+            f"{tool['description']}\n\n"
+            f"{state}\n{metadata.get('type', tool['kind']).upper()} · {tool['group'].upper()}\n"
             f"Package/App ID: {tool['package']}\n"
             f"Launch command: {command or 'No command detected'}\n"
             f"Install command: {install}\n\n"
-            f"Description\n"
-            f"-----------\n{tool['description']}\n\n"
-            f"Guide\n"
-            f"-----\n"
-            f"Use this entry to launch, inspect, install/repair, and learn the command. "
-            f"For graphical tools, Launch opens the application. For terminal tools, Open in Terminal is usually the better first action.\n\n"
-            f"Command Library\n"
-            f"---------------\n"
+            f"CAPABILITIES\n{capabilities}\n\n"
+            f"COMMANDOS INTEGRATION\n{integrations}\n\n"
+            f"RELATED TOOLS\n{', '.join(related) if related else 'None declared'}\n\n"
+            f"COMMAND LIBRARY\n"
             f"Launch:\n  {command or 'No launch command detected'}\n\n"
             f"Open in terminal:\n  {command or tool['package']}\n\n"
             f"Install / repair:\n  {install}\n\n"
@@ -1803,6 +2523,9 @@ class ToolLibraryPage(QWidget):
             f"- Install uses yay/paru when available, then pacman as fallback. Flatpaks use flathub.\n"
             f"- For command-line tools, start with --help or man pages for full usage.\n"
         )
+
+    def shutdown(self):
+        self.inventory_executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ReaderFullscreenDialog(QDialog):
@@ -3008,6 +3731,16 @@ class DeploymentPage(QWidget):
         super().__init__()
         self.parent_window = parent_window
         self.deployments = []
+        self.deployment_state = self.load_deployment_state()
+        self.overview_status = QLabel("--")
+        self.overview_status.setObjectName("controlState")
+        self.overview_status.setWordWrap(True)
+        self.pipeline_status = QLabel("--")
+        self.pipeline_status.setObjectName("controlState")
+        self.pipeline_status.setWordWrap(True)
+        self.build_list = QListWidget()
+        self.validation_list = QListWidget()
+        self.release_list = QListWidget()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search deployments")
         self.search.textChanged.connect(self.render_deployments)
@@ -3032,7 +3765,12 @@ class DeploymentPage(QWidget):
         title = QLabel("DEPLOYMENT CENTRE")
         title.setObjectName("healthHeader")
         layout.addWidget(title)
-        layout.addWidget(self.status)
+
+        tabs = QTabWidget()
+        tabs.addTab(self.overview_page(), "Overview")
+        profiles_page = QWidget()
+        profiles_layout = QVBoxLayout(profiles_page)
+        profiles_layout.addWidget(self.status)
 
         controls = QHBoxLayout()
         controls.addWidget(self.search, 1)
@@ -3040,7 +3778,7 @@ class DeploymentPage(QWidget):
         reload_button = QPushButton("Reload Profiles")
         reload_button.clicked.connect(self.refresh)
         controls.addWidget(reload_button)
-        new_button = QPushButton("New Deployment")
+        new_button = QPushButton("New Workspace Profile")
         new_button.clicked.connect(self.new_deployment)
         controls.addWidget(new_button)
         edit_button = QPushButton("Edit")
@@ -3055,7 +3793,13 @@ class DeploymentPage(QWidget):
         save_button = QPushButton("Save Current Workspace")
         save_button.clicked.connect(self.save_current_workspace)
         controls.addWidget(save_button)
-        layout.addLayout(controls)
+        validate_button = QPushButton("Validate")
+        validate_button.clicked.connect(self.validate_selected_profile)
+        controls.addWidget(validate_button)
+        compare_button = QPushButton("Compare")
+        compare_button.clicked.connect(self.compare_selected_profile)
+        controls.addWidget(compare_button)
+        profiles_layout.addLayout(controls)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.list)
@@ -3068,7 +3812,7 @@ class DeploymentPage(QWidget):
         right_layout.addWidget(self.actions, 1)
         buttons = QHBoxLayout()
         for label, handler in [
-            ("Launch Deployment", self.launch_selected_deployment),
+            ("Launch Workspace", self.launch_selected_deployment),
             ("Run Quick Action", self.run_quick_action),
             ("Open Profile JSON", self.open_profiles_json),
         ]:
@@ -3080,12 +3824,98 @@ class DeploymentPage(QWidget):
         right_layout.addWidget(self.result)
         split.addWidget(right)
         split.setSizes([360, 780])
-        layout.addWidget(split, 1)
+        profiles_layout.addWidget(split, 1)
+        tabs.addTab(profiles_page, "Profiles")
+        tabs.addTab(self.builds_page(), "Builds")
+        tabs.addTab(self.validation_page(), "Validation")
+        tabs.addTab(self.releases_page(), "Releases")
+        layout.addWidget(tabs, 1)
         self.refresh()
+
+    def default_deployment_state(self):
+        return {
+            "schema_version": 1,
+            "system_profiles": [{
+                "id": "commandos_workstation", "name": "CommandOS Workstation", "revision": 1,
+                "type": "system_profile", "required_packages": ["base", "linux-cachyos"],
+                "optional_packages": ["plasma-meta", "command-centre"], "services": [],
+                "tool_collections": ["commandos-base"], "policies": {"release_channel": "development"},
+            }],
+            "build_targets": [{"id": "x86_64_iso", "name": "x86_64 ISO", "type": "iso"}],
+            "build_jobs": [], "artifacts": [], "releases": [], "validation_reports": [],
+        }
+
+    def load_deployment_state(self):
+        try:
+            data = json.loads(DEPLOYMENT_STATE_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) and data.get("schema_version") == 1 else self.default_deployment_state()
+        except Exception:
+            return self.default_deployment_state()
+
+    def save_deployment_state(self):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        DEPLOYMENT_STATE_FILE.write_text(json.dumps(self.deployment_state, indent=2), encoding="utf-8")
+
+    def panel(self, title):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        heading = QLabel(title)
+        heading.setObjectName("panelTitle")
+        layout.addWidget(heading)
+        return frame, layout
+
+    def overview_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        state, state_layout = self.panel("Deployment State")
+        state_layout.addWidget(self.overview_status)
+        layout.addWidget(state)
+        pipeline, pipeline_layout = self.panel("Deployment Pipeline")
+        pipeline_layout.addWidget(self.pipeline_status)
+        layout.addWidget(pipeline)
+        note = QLabel("Workspace Profiles configure the current session. System Profiles declare desired machine state. Build Targets produce immutable artifacts.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch()
+        return page
+
+    def builds_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.build_list)
+        row = QHBoxLayout()
+        create = QPushButton("NEW PLANNED BUILD")
+        create.clicked.connect(self.create_planned_build)
+        row.addWidget(create)
+        row.addStretch()
+        layout.addLayout(row)
+        return page
+
+    def validation_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        run = QPushButton("VALIDATE HOST & SELECTED PROFILE")
+        run.clicked.connect(self.validate_selected_profile)
+        layout.addWidget(run)
+        layout.addWidget(self.validation_list)
+        return page
+
+    def releases_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.release_list)
+        note = QLabel("A release can only reference a successful build with a verified artifact. Publishing remains disabled until a destination and signing policy are configured.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        return page
 
     def refresh(self):
         self.deployments = self.load_deployments()
         self.render_deployments()
+        self.render_deployment_state()
 
     def load_json_file(self, path):
         try:
@@ -3116,9 +3946,15 @@ class DeploymentPage(QWidget):
         custom = self.load_json_file(USER_DEPLOYMENTS_CONFIG)
         for profile in defaults:
             profile.setdefault("tier", "primary")
+            profile.setdefault("schema_version", 1)
+            profile.setdefault("type", "workspace_profile")
+            profile.setdefault("revision", 1)
             profile.setdefault("source", str(DEFAULT_DEPLOYMENTS_FILE))
         for profile in custom:
             profile["tier"] = "custom"
+            profile.setdefault("schema_version", 1)
+            profile.setdefault("type", "workspace_profile")
+            profile.setdefault("revision", 1)
             profile.setdefault("source", str(USER_DEPLOYMENTS_CONFIG))
         return defaults + custom
 
@@ -3130,6 +3966,7 @@ class DeploymentPage(QWidget):
         profile = dialog.profile_data()
         profile["id"] = self.unique_profile_id(profile["name"], profiles)
         profile["tier"] = "custom"
+        profile.update({"schema_version": 1, "type": "workspace_profile", "revision": 1})
         profiles.append(profile)
         self.save_custom_profiles(profiles)
         self.result.setPlainText(f"Created deployment: {profile['name']}")
@@ -3153,12 +3990,14 @@ class DeploymentPage(QWidget):
         profiles = self.custom_profiles()
         updated = dialog.profile_data()
         updated["tier"] = "custom"
+        updated.update({"schema_version": 1, "type": "workspace_profile"})
         if editing_default:
             updated["id"] = self.unique_profile_id(updated["name"], profiles)
             profiles.append(updated)
             message = f"Created editable custom copy: {updated['name']}"
         else:
             updated["id"] = profile.get("id")
+            updated["revision"] = int(profile.get("revision", 1)) + 1
             replaced = False
             for index, item in enumerate(profiles):
                 if item.get("id") == updated["id"]:
@@ -3182,6 +4021,7 @@ class DeploymentPage(QWidget):
         duplicate["name"] = f"{profile.get('name', 'Deployment')} Copy"
         duplicate["id"] = self.unique_profile_id(duplicate["name"], profiles)
         duplicate["tier"] = "custom"
+        duplicate["revision"] = 1
         duplicate.pop("source", None)
         profiles.append(duplicate)
         self.save_custom_profiles(profiles)
@@ -3224,7 +4064,7 @@ class DeploymentPage(QWidget):
                 continue
             if tier != "all" and profile.get("tier") != tier:
                 continue
-            item = QListWidgetItem(f"{profile.get('name', 'Deployment')}  [{profile.get('tier', 'primary')}]\n{profile.get('summary', '')}")
+            item = QListWidgetItem(f"{profile.get('name', 'Workspace')}  ·  WORKSPACE PROFILE  ·  REV {profile.get('revision', 1)}\n{profile.get('summary', '')}")
             item.setData(Qt.UserRole, profile)
             self.list.addItem(item)
             shown += 1
@@ -3232,7 +4072,7 @@ class DeploymentPage(QWidget):
                 item.setSelected(True)
         if not self.list.selectedItems() and self.list.count():
             self.list.item(0).setSelected(True)
-        self.status.setText(f"{shown} shown / {len(self.deployments)} profile-driven deployments loaded.")
+        self.status.setText(f"{shown} shown / {len(self.deployments)} Workspace Profiles loaded · {len(self.deployment_state['system_profiles'])} System Profiles")
         self.selection_changed()
 
     def selected_deployment(self):
@@ -3260,6 +4100,113 @@ class DeploymentPage(QWidget):
             return "available" if len(parts) >= 3 and run_text(["flatpak", "info", parts[2]], 2)[2] == 0 else "missing"
         return "available" if command_exists(executable) else "missing"
 
+    def profile_hash(self, profile):
+        canonical = {key: value for key, value in profile.items() if key not in ("source", "profile_hash")}
+        return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def resolve_profile(self, profile):
+        missing_required = []
+        missing_optional = []
+        available = 0
+        for app in profile.get("apps", []):
+            if self.component_status(app.get("command", "")) == "available":
+                available += 1
+            elif app.get("optional", False):
+                missing_optional.append(f"{app.get('name', app.get('package', 'Unknown'))} · {app.get('package', 'no package declared')}")
+            else:
+                missing_required.append(f"{app.get('name', app.get('package', 'Unknown'))} · {app.get('package', 'no package declared')}")
+        invalid_services = [service for service in profile.get("services", []) if not re.match(r"^[A-Za-z0-9_.@:-]+\.service$", service)]
+        folders = [Path(os.path.expanduser(folder)) for folder in profile.get("folders", [])]
+        return {"app_count": len(profile.get("apps", [])), "available_apps": available,
+                "missing_required": missing_required, "missing_optional": missing_optional,
+                "invalid_services": invalid_services, "folder_count": len(folders),
+                "available_folders": sum(path.exists() for path in folders)}
+
+    def validate_selected_profile(self):
+        profile = self.selected_deployment()
+        if not profile:
+            self.result.setPlainText("Select a Workspace Profile first.")
+            return
+        resolution = self.resolve_profile(profile)
+        checks = [
+            self.validation_check("profile.schema", "Profile schema is supported", profile.get("schema_version") == 1, "FAIL"),
+            self.validation_check("profile.identity", "Profile has a stable ID and name", bool(profile.get("id") and profile.get("name")), "FAIL"),
+            self.validation_check("profile.commands", "Required applications are available", not resolution["missing_required"], "FAIL", resolution["missing_required"]),
+            self.validation_check("profile.optional", "Optional applications are available", not resolution["missing_optional"], "WARN", resolution["missing_optional"]),
+            self.validation_check("profile.services", "Service identifiers are valid", not resolution["invalid_services"], "FAIL", resolution["invalid_services"]),
+            self.validation_check("host.disk", "Build host has at least 20 GiB free", shutil.disk_usage(APP_DIR).free >= 20 * 1024**3, "FAIL"),
+            self.validation_check("host.packages", "Pacman package manager is available", command_exists("pacman"), "FAIL"),
+            self.validation_check("host.build_tool", "Arch ISO build tooling is available", command_exists("mkarchiso"), "WARN"),
+        ]
+        report = {"id": f"validation-{int(time.time())}", "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                  "profile_id": profile["id"], "profile_hash": self.profile_hash(profile), "checks": checks}
+        self.deployment_state["validation_reports"].insert(0, report)
+        self.deployment_state["validation_reports"] = self.deployment_state["validation_reports"][:50]
+        self.save_deployment_state()
+        self.render_deployment_state()
+        failed = sum(check["status"] == "FAIL" for check in checks)
+        warnings = sum(check["status"] == "WARN" for check in checks)
+        self.result.setPlainText(f"Validation completed: {len(checks)-failed-warnings} passed · {warnings} warnings · {failed} failed\n\n" +
+                                 "\n".join(f"{check['status']}  {check['message']}" + (f"\n  {', '.join(check['evidence'])}" if check.get("evidence") else "") for check in checks))
+
+    def validation_check(self, check_id, message, passed, failure_status, evidence=None):
+        return {"id": check_id, "message": message, "status": "PASS" if passed else failure_status,
+                "evidence": evidence or [], "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+    def compare_selected_profile(self):
+        profile = self.selected_deployment()
+        if not profile:
+            return
+        resolution = self.resolve_profile(profile)
+        services = profile.get("services", [])
+        lines = [f"CURRENT SYSTEM → {profile.get('name', 'PROFILE').upper()}", "",
+                 f"+ {len(resolution['missing_required'])} required applications missing",
+                 f"+ {len(resolution['missing_optional'])} optional applications missing",
+                 f"= {resolution['available_apps']} applications already available",
+                 f"= {len(services)} services declared",
+                 f"= {resolution['available_folders']} / {resolution['folder_count']} workspace paths present", "",
+                 "No removals are inferred from absence. This Workspace Profile is additive and session-scoped."]
+        self.result.setPlainText("\n".join(lines))
+
+    def create_planned_build(self):
+        profile = self.deployment_state["system_profiles"][0] if self.deployment_state["system_profiles"] else None
+        target = self.deployment_state["build_targets"][0] if self.deployment_state["build_targets"] else None
+        if not profile or not target:
+            self.result.setPlainText("A System Profile and Build Target are required before creating a job.")
+            return
+        job_id = f"build-{len(self.deployment_state['build_jobs']) + 1:04d}"
+        job = {"id": job_id, "schema_version": 1, "status": "PLANNED", "stage": "PROFILE",
+               "created": time.strftime("%Y-%m-%d %H:%M:%S"), "profile_id": profile["id"],
+               "profile_revision": profile.get("revision", 1), "profile_hash": self.profile_hash(profile),
+               "target_id": target["id"], "logs": [], "artifacts": []}
+        self.deployment_state["build_jobs"].insert(0, job)
+        self.save_deployment_state()
+        self.render_deployment_state()
+        self.result.setPlainText(f"Created {job_id} as a PLANNED job.\n\nNo build command was executed. Resolve and validation stages must complete before build execution is enabled.")
+
+    def render_deployment_state(self):
+        jobs = self.deployment_state["build_jobs"]
+        latest = jobs[0] if jobs else None
+        reports = self.deployment_state["validation_reports"]
+        latest_report = reports[0] if reports else None
+        failed = sum(check["status"] == "FAIL" for check in latest_report.get("checks", [])) if latest_report else 0
+        warnings = sum(check["status"] == "WARN" for check in latest_report.get("checks", [])) if latest_report else 0
+        active_workspace = self.selected_deployment().get("name", "None") if self.selected_deployment() else "None"
+        system_profile = self.deployment_state["system_profiles"][0]["name"] if self.deployment_state["system_profiles"] else "None"
+        self.overview_status.setText(f"ACTIVE WORKSPACE  {active_workspace}\nSYSTEM PROFILE    {system_profile}\nLATEST BUILD      {latest['id'] + ' · ' + latest['status'] if latest else 'NOT BUILT'}\nVALIDATION        {failed} FAILURES · {warnings} WARNINGS\nRELEASES          {len(self.deployment_state['releases'])}")
+        completed = latest.get("stage") if latest else "NONE"
+        self.pipeline_status.setText(f"PROFILE  {'✓' if latest else '○'}  →  RESOLVE  ○  →  VALIDATE  {'⚠' if failed or warnings else '○'}  →  BUILD  ○\nTEST  ○  →  CHECKSUM  ○  →  ARCHIVE  ○  →  RELEASE  ○\nCurrent stage: {completed}")
+        self.build_list.clear()
+        for job in jobs:
+            self.build_list.addItem(f"{job['id'].upper()}  ·  {job['status']}  ·  {job['stage']}\nProfile {job['profile_id']} revision {job['profile_revision']} · Target {job['target_id']}\nCreated {job['created']} · Hash {job['profile_hash'][:12]}")
+        self.validation_list.clear()
+        for report in reports:
+            checks = report.get("checks", [])
+            self.validation_list.addItem(f"{report['id']}  ·  {report['timestamp']}\n{sum(c['status']=='PASS' for c in checks)} PASS · {sum(c['status']=='WARN' for c in checks)} WARN · {sum(c['status']=='FAIL' for c in checks)} FAIL\nProfile {report['profile_id']} · {report['profile_hash'][:12]}")
+        self.release_list.clear()
+        for release in self.deployment_state["releases"]:
+            self.release_list.addItem(f"{release.get('version', 'Unknown')} · {release.get('channel', 'development').upper()} · {release.get('status', 'DRAFT')}\nBuild {release.get('build_id', '--')}")
+
     def profile_detail(self, profile):
         lines = [
             profile.get("name", "Deployment"),
@@ -3267,6 +4214,8 @@ class DeploymentPage(QWidget):
             "",
             profile.get("summary", ""),
             "",
+            "Type: Workspace Profile",
+            f"Schema: {profile.get('schema_version', 1)} · Revision: {profile.get('revision', 1)} · Hash: {self.profile_hash(profile)[:12]}",
             f"Tier: {profile.get('tier', 'primary')}",
             f"Source: {profile.get('source', DEFAULT_DEPLOYMENTS_FILE)}",
         ]
@@ -3294,6 +4243,17 @@ class DeploymentPage(QWidget):
         if profile.get("profiles"):
             lines.extend(["", "Sub-Profiles", "------------"])
             lines.extend(profile["profiles"])
+        resolution = self.resolve_profile(profile)
+        lines.extend(["", "Profile Resolution", "------------------",
+                      f"Applications available: {resolution['available_apps']} / {resolution['app_count']}",
+                      f"Required components missing: {len(resolution['missing_required'])}",
+                      f"Optional components missing: {len(resolution['missing_optional'])}",
+                      f"Invalid services: {len(resolution['invalid_services'])}",
+                      f"Workspace paths available: {resolution['available_folders']} / {resolution['folder_count']}"])
+        if resolution["missing_required"]:
+            lines.extend(["", "Missing required:", *resolution["missing_required"]])
+        if resolution["missing_optional"]:
+            lines.extend(["", "Optional missing:", *resolution["missing_optional"]])
         return "\n".join(lines)
 
     def launch_selected_deployment(self):
@@ -3301,7 +4261,7 @@ class DeploymentPage(QWidget):
         if not profile:
             return
         warning = profile.get("warning", "")
-        message = f"Launch deployment workspace?\n\n{profile.get('name')}\n\n{profile.get('summary', '')}"
+        message = f"Launch Workspace Profile?\n\n{profile.get('name')}\n\n{profile.get('summary', '')}"
         if warning:
             message += f"\n\nWARNING:\n{warning}"
         if not confirm(self, "Launch Deployment", message):
@@ -3404,6 +4364,9 @@ class DeploymentPage(QWidget):
             "terminals": [{"title": f"{name.strip()} Terminal", "cwd": str(Path.home()), "command": "exec bash"}],
             "folders": [str(Path.home())],
             "quick_actions": [],
+            "schema_version": 1,
+            "type": "workspace_profile",
+            "revision": 1,
         }
         profiles = self.custom_profiles()
         profile["id"] = self.unique_profile_id(profile["name"], profiles)
@@ -3857,6 +4820,9 @@ class MainWindow(QMainWindow):
         self.update_cache = None
         self.update_cache_time = 0
         self.change_history = []
+        self.last_dashboard_state = {}
+        self.probe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="command-centre-probes")
+        self.probe_future = None
 
         root = QWidget()
         root.setObjectName("appRoot")
@@ -3877,7 +4843,7 @@ class MainWindow(QMainWindow):
             self.sidebar.addWidget(button)
 
             if module_id == "dashboard":
-                page = DashboardPage()
+                page = DashboardPage(self)
             elif module_id == "control":
                 page = ControlPage(self)
             elif module_id == "tools":
@@ -3924,6 +4890,10 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_all)
         self.timer.start(5000)
+
+        self.probe_poll_timer = QTimer(self)
+        self.probe_poll_timer.timeout.connect(self.finish_refresh)
+        self.probe_poll_timer.start(100)
 
         self.open_module("dashboard")
         self.refresh_all()
@@ -3978,11 +4948,15 @@ class MainWindow(QMainWindow):
         self.change_history = self.change_history[:20]
 
     def refresh_all(self):
-        self.telemetry = read_telemetry()
+        if self.probe_future is None:
+            self.probe_future = self.probe_executor.submit(self.collect_dashboard_snapshot)
+
+    def collect_dashboard_snapshot(self):
+        telemetry = read_telemetry()
         kernel = run_text(["uname", "-r"])[0] or os.uname().release
         uptime = run_text(["uptime", "-p"])[0] or "--"
         failed = run_text(["systemctl", "--failed", "--no-legend", "--no-pager"], 2)[0]
-        self.system = {
+        system = {
             "host": os.uname().nodename,
             "kernel": kernel,
             "uptime": uptime,
@@ -3997,9 +4971,51 @@ class MainWindow(QMainWindow):
             "storage_health": self.storage_health(),
             "activity": self.recent_activity(),
         }
+        return telemetry, system
+
+    def finish_refresh(self):
+        if self.probe_future is None or not self.probe_future.done():
+            return
+        future = self.probe_future
+        self.probe_future = None
+        try:
+            telemetry, system = future.result()
+        except Exception as error:
+            self.add_history(f"Dashboard probe failed: {error}")
+            return
+        self.record_dashboard_transitions(telemetry, system)
+        system["activity"] = self.recent_activity(telemetry)
+        self.telemetry = telemetry
+        self.system = system
         self.pages["dashboard"].refresh(self.telemetry, self.system)
         if self.stack.currentWidget() and self.stack.currentIndex() == 1:
             self.pages["control"].refresh()
+
+    def record_dashboard_transitions(self, telemetry, system):
+        current = {
+            "telemetry": bool(telemetry),
+            "power": metric_value(telemetry, "power_profile_label", "Unknown"),
+            "updates": system.get("updates"),
+            "failed": system.get("failed", 0),
+            "network": system.get("connection", "Unknown"),
+        }
+        previous = self.last_dashboard_state
+        if previous:
+            labels = {
+                "telemetry": lambda value: "Telemetry connected" if value else "Telemetry disconnected",
+                "power": lambda value: f"Power profile changed to {value}",
+                "updates": lambda value: "No updates available" if value == 0 else f"{value} updates detected",
+                "failed": lambda value: "Failed services cleared" if value == 0 else f"{value} failed services detected",
+                "network": lambda value: f"Network changed to {value}",
+            }
+            for key, formatter in labels.items():
+                if current.get(key) != previous.get(key):
+                    self.add_history(formatter(current.get(key)))
+        else:
+            self.add_history("Dashboard monitoring started")
+            if current["telemetry"]:
+                self.add_history("Telemetry connected")
+        self.last_dashboard_state = current
 
     def power_state(self):
         if not command_exists("powerprofilesctl"):
@@ -4119,19 +5135,21 @@ class MainWindow(QMainWindow):
                     return f"{parts[2]} used / {parts[1]} total"
         return "--"
 
-    def recent_activity(self):
-        data = self.telemetry
-        live = [
-            f"{metric_value(data, 'timestamp', 'now')}  Telemetry refreshed",
-            f"Power profile: {metric_value(data, 'power_profile_label', 'Unknown')}",
-            f"Network: {metric_value(data, 'network_iface', 'offline')} / {metric_value(data, 'vpn_status', 'VPN OFF')}",
-        ]
-        return self.change_history[:5] + live
+    def recent_activity(self, data=None):
+        history = self.change_history[:7]
+        return history or ["No meaningful state changes recorded this session."]
 
     def closeEvent(self, event):
         offline = self.pages.get("offline")
         if offline and hasattr(offline, "stop_kiwix_server"):
             offline.stop_kiwix_server()
+        tools_page = self.pages.get("tools")
+        if tools_page and hasattr(tools_page, "shutdown"):
+            tools_page.shutdown()
+        software_page = self.pages.get("software")
+        if software_page and hasattr(software_page, "shutdown"):
+            software_page.shutdown()
+        self.probe_executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
 
@@ -4242,6 +5260,21 @@ def main():
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #101821, stop:1 #090e14);
             border: 1px solid #25394a;
             border-radius: 8px;
+        }
+        #alertRow, QFrame#alertRow {
+            background: #0b131b;
+            border: 1px solid #30465a;
+            border-radius: 6px;
+        }
+        #queueBar, QFrame#queueBar {
+            background: #102131;
+            border: 1px solid #1e9be8;
+            border-radius: 8px;
+        }
+        #controlState {
+            color: #65d3ff;
+            font-weight: 750;
+            padding: 3px 0;
         }
         #intelSearch {
             background: #07131d;
