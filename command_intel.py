@@ -82,9 +82,46 @@ class IntelStore:
                 created_utc TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS targets (
+                id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                type TEXT NOT NULL, value TEXT NOT NULL, purpose TEXT DEFAULT '', status TEXT DEFAULT 'active',
+                scope_status TEXT DEFAULT 'review', entity_id INTEGER, notes TEXT DEFAULT '', created_utc TEXT NOT NULL,
+                UNIQUE(case_id,type,value)
+            );
+            CREATE TABLE IF NOT EXISTS plans (
+                id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                title TEXT NOT NULL, objective TEXT DEFAULT '', status TEXT DEFAULT 'active', created_utc TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL, title TEXT NOT NULL, status TEXT DEFAULT 'pending', resource TEXT DEFAULT '',
+                input TEXT DEFAULT '', output TEXT DEFAULT '', started_utc TEXT DEFAULT '', completed_utc TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS evidence_inbox (
+                id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                title TEXT NOT NULL, kind TEXT NOT NULL, source TEXT DEFAULT '', local_path TEXT DEFAULT '',
+                sha256 TEXT DEFAULT '', notes TEXT DEFAULT '', status TEXT DEFAULT 'unreviewed', collected_utc TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS findings (
+                id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                title TEXT NOT NULL, narrative TEXT DEFAULT '', status TEXT DEFAULT 'draft', confidence TEXT DEFAULT 'medium',
+                limitations TEXT DEFAULT '', ai_assisted INTEGER DEFAULT 0, created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS finding_evidence (
+                finding_id INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+                evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+                role TEXT DEFAULT 'supporting', PRIMARY KEY(finding_id,evidence_id,role)
+            );
+            CREATE TABLE IF NOT EXISTS custody_events (
+                id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL, evidence_id INTEGER,
+                action TEXT NOT NULL, detail TEXT DEFAULT '', previous_hash TEXT DEFAULT '', event_hash TEXT NOT NULL,
+                created_utc TEXT NOT NULL
+            );
         """)
         if not self.db.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]:
-            self.db.execute("INSERT INTO schema_version VALUES(2)")
+            self.db.execute("INSERT INTO schema_version VALUES(3)")
+        else:
+            self.db.execute("UPDATE schema_version SET version=3")
         self.ensure_column("cases", "status", "TEXT DEFAULT 'active'")
         self.ensure_column("cases", "authorization", "TEXT DEFAULT ''")
         self.ensure_column("cases", "scope", "TEXT DEFAULT ''")
@@ -138,9 +175,44 @@ class IntelStore:
             "INSERT INTO evidence(case_id,title,kind,source,local_path,sha256,notes,created_utc) VALUES(?,?,?,?,?,?,?,?)",
             (case_id, title, kind, source, local_path, digest, notes, self.now()),
         )
+        evidence_id = cursor.lastrowid
         self.log(case_id, "Evidence added", title)
+        self.add_custody_event(case_id, evidence_id, "accepted", f"{kind}: {title}; original SHA-256 {digest or 'not applicable'}")
         self.db.commit()
-        return cursor.lastrowid
+        return evidence_id
+
+    def add_custody_event(self, case_id, evidence_id, action, detail=""):
+        previous = self.db.execute("SELECT event_hash FROM custody_events WHERE case_id=? ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
+        previous_hash = previous[0] if previous else ""
+        created = self.now()
+        payload = f"{case_id}|{evidence_id or ''}|{action}|{detail}|{created}|{previous_hash}"
+        event_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        self.db.execute("INSERT INTO custody_events(case_id,evidence_id,action,detail,previous_hash,event_hash,created_utc) VALUES(?,?,?,?,?,?,?)",
+                        (case_id, evidence_id, action, detail, previous_hash, event_hash, created))
+
+    def add_inbox(self, case_id, title, kind, source="", local_path="", digest="", notes=""):
+        cursor = self.db.execute("INSERT INTO evidence_inbox(case_id,title,kind,source,local_path,sha256,notes,collected_utc) VALUES(?,?,?,?,?,?,?,?)",
+                                 (case_id,title,kind,source,local_path,digest,notes,self.now()))
+        self.log(case_id, "Collected to inbox", title); self.db.commit(); return cursor.lastrowid
+
+    def inbox(self, case_id, status="unreviewed"):
+        return self.db.execute("SELECT * FROM evidence_inbox WHERE case_id=? AND status=? ORDER BY id DESC", (case_id,status)).fetchall()
+
+    def accept_inbox(self, inbox_id):
+        row = self.db.execute("SELECT * FROM evidence_inbox WHERE id=?", (inbox_id,)).fetchone()
+        if not row: return None
+        evidence_id = self.add_evidence(row["case_id"],row["title"],row["kind"],row["source"],row["local_path"],row["sha256"],row["notes"])
+        self.db.execute("UPDATE evidence_inbox SET status='accepted' WHERE id=?", (inbox_id,)); self.db.commit(); return evidence_id
+
+    def add_target(self, case_id, target_type, value, purpose=""):
+        cursor = self.db.execute("INSERT OR IGNORE INTO targets(case_id,type,value,purpose,created_utc) VALUES(?,?,?,?,?)", (case_id,target_type,value,purpose,self.now()))
+        self.log(case_id,"Target added",f"{target_type}: {value}"); self.db.commit(); return cursor.lastrowid
+
+    def targets(self, case_id): return self.db.execute("SELECT * FROM targets WHERE case_id=? ORDER BY id", (case_id,)).fetchall()
+    def findings(self, case_id): return self.db.execute("SELECT * FROM findings WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()
+    def add_finding(self, case_id, title, narrative, confidence="medium"):
+        now=self.now(); cursor=self.db.execute("INSERT INTO findings(case_id,title,narrative,confidence,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",(case_id,title,narrative,confidence,now,now)); self.log(case_id,"Draft finding created",title); self.db.commit(); return cursor.lastrowid
+    def activity(self, case_id, limit=12): return self.db.execute("SELECT * FROM activity WHERE case_id=? ORDER BY id DESC LIMIT ?",(case_id,limit)).fetchall()
 
     def add_entity(self, case_id, entity_type, value, source="", confidence=50):
         self.db.execute(
@@ -188,16 +260,29 @@ class AdvancedCommandIntelPage(QWidget):
         self.browser_tabs.tabCloseRequested.connect(self.close_browser_tab)
         self.case_combo = QComboBox()
         self.case_combo.currentIndexChanged.connect(self.select_case)
+        self.investigation_status = QLabel("NO ACTIVE CASE")
+        self.investigation_status.setObjectName("healthHeader")
+        self.investigation_status.setWordWrap(True)
         self.status = QLabel("Ready")
         self.status.setObjectName("muted")
+        self.build_overview()
         self.build_dashboard()
         self.build_browser()
         self.build_cases()
+        self.build_evidence()
         self.build_graph()
         self.build_tools()
         self.build_ai()
+        self.build_findings()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+        investigation_bar = QHBoxLayout()
+        investigation_bar.addWidget(QLabel("CASE:")); investigation_bar.addWidget(self.case_combo)
+        investigation_bar.addWidget(self.investigation_status, 1)
+        add_target = QPushButton("ADD TARGET"); capture = QPushButton("CAPTURE")
+        add_target.clicked.connect(self.add_target); capture.clicked.connect(self.capture_page)
+        investigation_bar.addWidget(add_target); investigation_bar.addWidget(capture)
+        layout.addLayout(investigation_bar)
         layout.addWidget(self.tabs)
         layout.addWidget(self.status)
         self.refresh_cases()
@@ -211,10 +296,10 @@ class AdvancedCommandIntelPage(QWidget):
 
     def build_dashboard(self):
         page = QWidget(); layout = QVBoxLayout(page)
-        hero, hero_layout = self.frame("COMMAND INTEL  ·  OSINT RESOURCE CENTRE")
+        hero, hero_layout = self.frame("TARGET WORKBENCH  ·  PUBLIC-SOURCE INVESTIGATION")
         row = QHBoxLayout()
         self.resource_filter = QLineEdit(); self.resource_filter.setPlaceholderText("Filter resources…")
-        row.addWidget(QLabel("Active case:")); row.addWidget(self.case_combo); row.addWidget(self.resource_filter, 1)
+        row.addWidget(self.resource_filter, 1)
         hero_layout.addLayout(row)
         layout.addWidget(hero)
         query, query_layout = self.frame("QUERY ONCE")
@@ -233,7 +318,19 @@ class AdvancedCommandIntelPage(QWidget):
         run.clicked.connect(self.run_search)
         self.query.returnPressed.connect(self.run_search)
         self.refresh_providers(); self.render_resources()
-        self.tabs.addTab(page, "Resources")
+        self.tabs.addTab(page, "Investigate")
+
+    def build_overview(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        summary, summary_layout = self.frame("INVESTIGATION OVERVIEW")
+        self.overview_summary = QLabel("Select or create a case to begin."); self.overview_summary.setObjectName("controlState"); self.overview_summary.setWordWrap(True)
+        summary_layout.addWidget(self.overview_summary); layout.addWidget(summary)
+        split = QSplitter()
+        targets, targets_layout = self.frame("TARGETS"); self.target_list = QListWidget(); targets_layout.addWidget(self.target_list)
+        progress, progress_layout = self.frame("INVESTIGATION PROGRESS & ATTENTION"); self.progress_summary = QLabel("--"); self.progress_summary.setObjectName("muted"); self.progress_summary.setWordWrap(True); progress_layout.addWidget(self.progress_summary)
+        split.addWidget(targets); split.addWidget(progress); layout.addWidget(split)
+        recent, recent_layout = self.frame("RECENT ACTIVITY"); self.activity_list = QListWidget(); recent_layout.addWidget(self.activity_list); layout.addWidget(recent)
+        self.tabs.addTab(page,"Overview")
 
     def render_resources(self):
         while self.cards_grid.count():
@@ -266,8 +363,10 @@ class AdvancedCommandIntelPage(QWidget):
         from urllib.parse import quote
         for item in selected: self.open_url(item.data(Qt.UserRole).format(q=quote(value, safe="")))
         if self.case_id:
+            self.store.add_target(self.case_id, self.target_type.currentText(), value, "Target Workbench collection")
             self.store.add_entity(self.case_id, self.target_type.currentText(), value, "Manual query", 80)
             self.store.log(self.case_id, "OSINT search", f"{self.target_type.currentText()}: {value}")
+            self.refresh_overview()
 
     def build_browser(self):
         page = QWidget(); layout = QVBoxLayout(page)
@@ -288,7 +387,7 @@ class AdvancedCommandIntelPage(QWidget):
         allow_site.clicked.connect(self.allow_current_site)
         external.clicked.connect(lambda: self.current_browser() and QDesktopServices.openUrl(self.current_browser().url()))
         self.privacy.currentTextChanged.connect(self.apply_privacy)
-        self.tabs.addTab(page, "Research Browser")
+        self.tabs.addTab(page, "Browser")
 
     def current_browser(self):
         return self.browser_tabs.currentWidget()
@@ -344,20 +443,31 @@ class AdvancedCommandIntelPage(QWidget):
             self.browser_tabs.widget(i).settings().setAttribute(QWebEngineSettings.JavascriptEnabled, not strict)
 
     def build_cases(self):
-        page = QWidget(); layout = QGridLayout(page)
+        page = QWidget(); layout = QVBoxLayout(page)
         cases, cases_layout = self.frame("CASES")
         self.case_list = QListWidget(); new = QPushButton("New case"); edit = QPushButton("Authorization & scope"); archive = QPushButton("Archive"); delete = QPushButton("Delete"); backup = QPushButton("Backup database"); bundle = QPushButton("Export case bundle"); report = QPushButton("Export HTML report")
         cases_layout.addWidget(self.case_list)
         for button in (new, edit, archive, delete, backup, bundle, report): cases_layout.addWidget(button)
-        evidence, evidence_layout = self.frame("EVIDENCE · SHA-256 INTEGRITY")
+        layout.addWidget(cases)
+        new.clicked.connect(self.new_case); edit.clicked.connect(self.edit_case); archive.clicked.connect(self.archive_case); delete.clicked.connect(self.delete_case); backup.clicked.connect(self.backup_database); bundle.clicked.connect(self.export_case_bundle); report.clicked.connect(self.export_report); self.case_list.currentItemChanged.connect(self.case_list_changed)
+        self.tabs.addTab(page, "Cases")
+
+    def build_evidence(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        inbox, inbox_layout = self.frame("EVIDENCE INBOX · REVIEW REQUIRED")
+        inbox_buttons = QHBoxLayout(); accept = QPushButton("Accept as evidence"); discard = QPushButton("Discard with record")
+        inbox_buttons.addWidget(accept); inbox_buttons.addWidget(discard); inbox_buttons.addStretch()
+        self.inbox_list = QListWidget(); inbox_layout.addLayout(inbox_buttons); inbox_layout.addWidget(self.inbox_list)
+        layout.addWidget(inbox)
+        evidence, evidence_layout = self.frame("ACCEPTED EVIDENCE · SHA-256 INTEGRITY")
         buttons = QHBoxLayout(); add_file = QPushButton("Import file"); add_note = QPushButton("Add note"); verify = QPushButton("Verify hashes")
         buttons.addWidget(add_file); buttons.addWidget(add_note); buttons.addWidget(verify)
         self.evidence_table = QTableWidget(0, 5); self.evidence_table.setHorizontalHeaderLabels(["UTC", "Type", "Title", "SHA-256", "Source"])
         evidence_layout.addLayout(buttons); evidence_layout.addWidget(self.evidence_table)
-        layout.addWidget(cases, 0, 0); layout.addWidget(evidence, 0, 1); layout.setColumnStretch(1, 2)
-        new.clicked.connect(self.new_case); edit.clicked.connect(self.edit_case); archive.clicked.connect(self.archive_case); delete.clicked.connect(self.delete_case); backup.clicked.connect(self.backup_database); bundle.clicked.connect(self.export_case_bundle); report.clicked.connect(self.export_report); add_file.clicked.connect(self.import_file)
-        add_note.clicked.connect(self.add_note_evidence); verify.clicked.connect(self.verify_hashes); self.case_list.currentItemChanged.connect(self.case_list_changed)
-        self.tabs.addTab(page, "Cases & Evidence")
+        layout.addWidget(evidence)
+        add_file.clicked.connect(self.import_file); add_note.clicked.connect(self.add_note_evidence); verify.clicked.connect(self.verify_hashes)
+        accept.clicked.connect(self.accept_inbox_item); discard.clicked.connect(self.discard_inbox_item)
+        self.tabs.addTab(page, "Evidence")
 
     def refresh_cases(self):
         active = self.case_id
@@ -368,8 +478,9 @@ class AdvancedCommandIntelPage(QWidget):
         self.case_combo.blockSignals(False)
         if active:
             index = self.case_combo.findData(active)
-            if index >= 0: self.case_combo.setCurrentIndex(index)
+            if index >= 0: self.case_combo.setCurrentIndex(index); self.select_case(index)
         elif self.case_combo.count(): self.select_case(0)
+        else: self.refresh_overview()
 
     def new_case(self):
         name, ok = QInputDialog.getText(self, "New investigation", "Case name:")
@@ -402,7 +513,13 @@ class AdvancedCommandIntelPage(QWidget):
         if not self.require_case(): return
         target, _ = QFileDialog.getSaveFileName(self, "Export case bundle", f"command-intel-case-{self.case_id}.zip", "ZIP (*.zip)")
         if not target: return
-        manifest = {"case_id": self.case_id, "exported_utc": self.store.now(), "evidence": [dict(row) for row in self.store.evidence(self.case_id)], "entities": [dict(row) for row in self.store.entities(self.case_id)], "relations": [dict(row) for row in self.store.relations(self.case_id)]}
+        manifest = {"case_id": self.case_id, "exported_utc": self.store.now(),
+                    "targets": [dict(row) for row in self.store.targets(self.case_id)],
+                    "evidence": [dict(row) for row in self.store.evidence(self.case_id)],
+                    "entities": [dict(row) for row in self.store.entities(self.case_id)],
+                    "relations": [dict(row) for row in self.store.relations(self.case_id)],
+                    "findings": [dict(row) for row in self.store.findings(self.case_id)],
+                    "custody_events": [dict(row) for row in self.store.db.execute("SELECT * FROM custody_events WHERE case_id=? ORDER BY id",(self.case_id,)).fetchall()]}
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2))
             for row in self.store.evidence(self.case_id):
@@ -414,7 +531,7 @@ class AdvancedCommandIntelPage(QWidget):
         self.case_id = self.case_combo.itemData(index) if index >= 0 else None
         for i in range(self.case_list.count()):
             if self.case_list.item(i).data(Qt.UserRole) == self.case_id: self.case_list.setCurrentRow(i); break
-        self.refresh_evidence(); self.refresh_graph()
+        self.refresh_evidence(); self.refresh_inbox(); self.refresh_graph(); self.refresh_overview(); self.refresh_findings()
 
     def case_list_changed(self, current, previous):
         if current:
@@ -439,8 +556,8 @@ class AdvancedCommandIntelPage(QWidget):
         source_path = Path(source); case_dir = EVIDENCE_DIR / str(self.case_id); case_dir.mkdir(parents=True, exist_ok=True)
         destination = case_dir / f"{int(time.time())}-{source_path.name}"; shutil.copy2(source_path, destination)
         digest = self.hash_file(destination)
-        self.store.add_evidence(self.case_id, source_path.name, "file", str(source_path), str(destination), digest)
-        self.refresh_evidence()
+        self.store.add_inbox(self.case_id, source_path.name, "file", str(source_path), str(destination), digest)
+        self.refresh_inbox(); self.refresh_overview()
 
     def add_note_evidence(self):
         if not self.require_case(): return
@@ -452,15 +569,15 @@ class AdvancedCommandIntelPage(QWidget):
         browser = self.current_browser(); case_dir = EVIDENCE_DIR / str(self.case_id); case_dir.mkdir(parents=True, exist_ok=True)
         path = case_dir / f"web-{int(time.time())}.png"
         if browser.grab().save(str(path), "PNG"):
-            digest = self.hash_file(path); self.store.add_evidence(self.case_id, browser.title() or "Web capture", "screenshot", browser.url().toString(), str(path), digest)
+            digest = self.hash_file(path); self.store.add_inbox(self.case_id, browser.title() or "Web capture", "screenshot", browser.url().toString(), str(path), digest)
             browser.page().toHtml(lambda markup, b=browser, folder=case_dir: self.save_page_html(markup, b, folder))
-            self.refresh_evidence(); self.status.setText(f"Captured {path.name}")
+            self.refresh_inbox(); self.refresh_overview(); self.status.setText(f"Collected {path.name} to Evidence Inbox")
 
     def save_page_html(self, markup, browser, case_dir):
         path = case_dir / f"web-{int(time.time())}.html"
         path.write_text(markup, encoding="utf-8")
-        self.store.add_evidence(self.case_id, f"{browser.title() or 'Web page'} (HTML)", "web-page", browser.url().toString(), str(path), self.hash_file(path), "Captured rendered page source")
-        self.refresh_evidence()
+        self.store.add_inbox(self.case_id, f"{browser.title() or 'Web page'} (HTML)", "web-page", browser.url().toString(), str(path), self.hash_file(path), "Captured rendered page source")
+        self.refresh_inbox(); self.refresh_overview()
 
     def refresh_evidence(self):
         rows = self.store.evidence(self.case_id) if self.case_id else []
@@ -468,6 +585,50 @@ class AdvancedCommandIntelPage(QWidget):
         for r, row in enumerate(rows):
             values = [row["created_utc"], row["kind"], row["title"], row["sha256"], row["source"]]
             for c, value in enumerate(values): self.evidence_table.setItem(r, c, QTableWidgetItem(value or ""))
+
+    def refresh_inbox(self):
+        if not hasattr(self,"inbox_list"): return
+        self.inbox_list.clear()
+        for row in self.store.inbox(self.case_id) if self.case_id else []:
+            item=QListWidgetItem(f"I-{row['id']:04d}  ·  {row['kind'].upper()}  ·  UNREVIEWED\n{row['title']}\n{row['collected_utc']}  ·  SHA-256 {row['sha256'] or 'not applicable'}")
+            item.setData(Qt.UserRole,row["id"]); self.inbox_list.addItem(item)
+
+    def accept_inbox_item(self):
+        selected=self.inbox_list.selectedItems()
+        if not selected:return
+        evidence_id=self.store.accept_inbox(selected[0].data(Qt.UserRole))
+        self.refresh_inbox(); self.refresh_evidence(); self.refresh_overview(); self.status.setText(f"Accepted as E-{evidence_id:04d}")
+
+    def discard_inbox_item(self):
+        selected=self.inbox_list.selectedItems()
+        if not selected:return
+        inbox_id=selected[0].data(Qt.UserRole)
+        if QMessageBox.question(self,"Discard collected item","Mark this inbox item discarded? The review decision remains recorded.")!=QMessageBox.Yes:return
+        self.store.db.execute("UPDATE evidence_inbox SET status='discarded' WHERE id=?",(inbox_id,)); self.store.log(self.case_id,"Inbox item discarded",f"I-{inbox_id:04d}"); self.store.db.commit(); self.refresh_inbox(); self.refresh_overview()
+
+    def add_target(self):
+        if not self.require_case():return
+        target_type,ok=QInputDialog.getItem(self,"Add target","Type:",list(self.providers.keys()),0,False)
+        if not ok:return
+        value,ok=QInputDialog.getText(self,"Add target",f"{target_type} value:")
+        if not ok or not value.strip():return
+        purpose,ok=QInputDialog.getText(self,"Target purpose","Authorized investigative purpose:")
+        if not ok:return
+        self.store.add_target(self.case_id,target_type,value.strip(),purpose.strip()); self.store.add_entity(self.case_id,target_type,value.strip(),"Case target",90); self.refresh_overview(); self.refresh_graph()
+
+    def refresh_overview(self):
+        if not hasattr(self,"overview_summary"):return
+        self.target_list.clear(); self.activity_list.clear()
+        if not self.case_id:
+            self.investigation_status.setText("NO ACTIVE CASE  ·  COLLECTION WILL NOT BE RETAINED"); self.overview_summary.setText("Create or select a case to begin."); return
+        case=self.store.db.execute("SELECT * FROM cases WHERE id=?",(self.case_id,)).fetchone()
+        targets=self.store.targets(self.case_id); evidence=self.store.evidence(self.case_id); entities=self.store.entities(self.case_id); findings=self.store.findings(self.case_id); inbox=self.store.inbox(self.case_id)
+        scope="DEFINED" if (case["scope"] or "").strip() else "MISSING"; authorization="RECORDED" if (case["authorization"] or "").strip() else "MISSING"
+        self.investigation_status.setText(f"SCOPE  {scope}  ·  AUTHORIZATION  {authorization}  ·  TARGETS {len(targets)}  ·  EVIDENCE {len(evidence)}  ·  ENTITIES {len(entities)}  ·  FINDINGS {len(findings)}")
+        self.overview_summary.setText(f"ACTIVE CASE  {case['name']}\nSTATUS       {case['status'].upper()}\nAUTHORIZATION {authorization}\nSCOPE         {scope}\nEVIDENCE      {len(evidence)} ACCEPTED · {len(inbox)} UNREVIEWED\nENTITIES      {len(entities)}\nFINDINGS      {len(findings)}")
+        for row in targets:self.target_list.addItem(f"{row['type'].upper()}  ·  {row['value']}  ·  {row['status'].upper()}\n{row['purpose'] or 'No purpose recorded'}")
+        self.progress_summary.setText(f"CASE CREATED       ✓\nSCOPE DEFINED      {'✓' if scope=='DEFINED' else '⚠'}\nAUTHORIZATION      {'✓' if authorization=='RECORDED' else '⚠'}\nTARGETS DEFINED    {'✓' if targets else '○'}\nCOLLECTION         {'●' if inbox else '○'}\nANALYST REVIEW     {'⚠ '+str(len(inbox))+' INBOX ITEMS' if inbox else '○'}\nFINDINGS           {len(findings)} DRAFT/REVIEWED")
+        for row in self.store.activity(self.case_id):self.activity_list.addItem(f"{row['created_utc']}  ·  {row['action']}\n{row['detail']}")
 
     def verify_hashes(self):
         if not self.require_case(): return
@@ -483,8 +644,11 @@ class AdvancedCommandIntelPage(QWidget):
         target, _ = QFileDialog.getSaveFileName(self, "Export report", "command-intel-report.html", "HTML (*.html)")
         if not target: return
         case = self.store.db.execute("SELECT * FROM cases WHERE id=?", (self.case_id,)).fetchone()
-        rows = self.store.evidence(self.case_id); entities = self.store.entities(self.case_id)
-        body = [f"<h1>{html.escape(case['name'])}</h1><p>Created {case['created_utc']}</p>", "<h2>Evidence</h2><table><tr><th>UTC</th><th>Type</th><th>Title</th><th>SHA-256</th><th>Source</th></tr>"]
+        rows = self.store.evidence(self.case_id); entities = self.store.entities(self.case_id); findings=self.store.findings(self.case_id)
+        body = [f"<h1>{html.escape(case['name'])}</h1><p>Created {case['created_utc']}</p>",
+                f"<h2>Scope &amp; Authorization</h2><p><b>Authorization:</b> {html.escape(case['authorization'] or 'Not recorded')}</p><p><b>Scope:</b> {html.escape(case['scope'] or 'Not recorded')}</p>",
+                "<h2>Approved Findings</h2><ol>" + "".join(f"<li><b>{html.escape(r['title'])}</b> · confidence {html.escape(r['confidence'])}<p>{html.escape(r['narrative'])}</p></li>" for r in findings if r["status"]=="approved") + "</ol>",
+                "<h2>Evidence</h2><table><tr><th>UTC</th><th>Type</th><th>Title</th><th>SHA-256</th><th>Source</th></tr>"]
         for row in rows: body.append("<tr>" + "".join(f"<td>{html.escape(str(row[key] or ''))}</td>" for key in ("created_utc","kind","title","sha256","source")) + "</tr>")
         body.append("</table><h2>Entities</h2><ul>" + "".join(f"<li>{html.escape(r['type'])}: {html.escape(r['value'])} ({r['confidence']}%)</li>" for r in entities) + "</ul>")
         Path(target).write_text("<!doctype html><meta charset='utf-8'><style>body{font-family:sans-serif;max-width:1100px;margin:auto;background:#111;color:#eee}table{border-collapse:collapse;width:100%}td,th{border:1px solid #555;padding:7px}</style>" + "".join(body), encoding="utf-8")
@@ -499,7 +663,7 @@ class AdvancedCommandIntelPage(QWidget):
         split = QSplitter(); split.addWidget(self.entity_list); split.addWidget(self.graph_view); split.setStretchFactor(1, 1)
         layout.addLayout(controls); layout.addWidget(split)
         add.clicked.connect(self.add_entity); relate.clicked.connect(self.connect_entities); refresh.clicked.connect(self.refresh_graph)
-        self.tabs.addTab(page, "Investigation Graph")
+        self.tabs.addTab(page, "Graph")
 
     def add_entity(self):
         if not self.require_case(): return
@@ -540,7 +704,7 @@ class AdvancedCommandIntelPage(QWidget):
         self.workflow_output = QPlainTextEdit(); self.workflow_output.setReadOnly(True)
         layout.addWidget(self.tool_list); layout.addLayout(controls); layout.addWidget(self.workflow_output)
         run.clicked.connect(self.run_tool); import_results.clicked.connect(self.import_structured_results); workflow.clicked.connect(self.domain_workflow)
-        self.tabs.addTab(page, "Tools & Workflows")
+        self.tabs.addTab(page, "Workflows")
 
     def run_tool(self):
         item = self.tool_list.currentItem()
@@ -588,7 +752,53 @@ class AdvancedCommandIntelPage(QWidget):
         self.ai_output = QPlainTextEdit(); self.ai_output.setReadOnly(True)
         layout.addWidget(notice); layout.addWidget(self.ai_prompt); layout.addLayout(buttons); layout.addWidget(self.ai_output, 1)
         summarize.clicked.connect(self.summarize_case); ask.clicked.connect(self.ask_ai)
-        self.tabs.addTab(page, "Command AI")
+        self.tabs.addTab(page, "Analysis")
+
+    def build_findings(self):
+        page=QWidget(); layout=QVBoxLayout(page)
+        notice=QLabel("Findings are human-reviewed investigative conclusions. AI may assist drafting but cannot approve a finding."); notice.setObjectName("muted"); notice.setWordWrap(True); layout.addWidget(notice)
+        controls=QHBoxLayout(); add=QPushButton("NEW DRAFT FINDING"); approve=QPushButton("APPROVE SELECTED"); link=QPushButton("LINK EVIDENCE")
+        controls.addWidget(add); controls.addWidget(approve); controls.addWidget(link); controls.addStretch(); layout.addLayout(controls)
+        self.finding_list=QListWidget(); layout.addWidget(self.finding_list)
+        add.clicked.connect(self.add_finding); approve.clicked.connect(self.approve_finding); link.clicked.connect(self.link_finding_evidence)
+        self.tabs.addTab(page,"Findings")
+
+    def refresh_findings(self):
+        if not hasattr(self,"finding_list"):return
+        self.finding_list.clear()
+        for row in self.store.findings(self.case_id) if self.case_id else []:
+            linked=self.store.db.execute("SELECT COUNT(*) FROM finding_evidence WHERE finding_id=?",(row["id"],)).fetchone()[0]
+            item=QListWidgetItem(f"F-{row['id']:04d}  ·  {row['status'].upper()}  ·  CONFIDENCE {row['confidence'].upper()}\n{row['title']}\n{row['narrative']}\n{linked} linked evidence item(s)"); item.setData(Qt.UserRole,row["id"]); self.finding_list.addItem(item)
+
+    def add_finding(self):
+        if not self.require_case():return
+        title,ok=QInputDialog.getText(self,"Draft finding","Title:")
+        if not ok or not title.strip():return
+        narrative,ok=QInputDialog.getMultiLineText(self,"Draft finding","Analyst narrative:")
+        if not ok:return
+        confidence,ok=QInputDialog.getItem(self,"Finding confidence","Confidence:",["low","medium","high"],1,False)
+        if ok:self.store.add_finding(self.case_id,title.strip(),narrative.strip(),confidence); self.refresh_findings(); self.refresh_overview()
+
+    def approve_finding(self):
+        selected=self.finding_list.selectedItems()
+        if not selected:return
+        finding_id=selected[0].data(Qt.UserRole)
+        linked=self.store.db.execute("SELECT COUNT(*) FROM finding_evidence WHERE finding_id=?",(finding_id,)).fetchone()[0]
+        if not linked:
+            QMessageBox.information(self,"Finding review","Link at least one accepted evidence item before approval.");return
+        if QMessageBox.question(self,"Approve finding","Approve this human-reviewed finding for reporting?")!=QMessageBox.Yes:return
+        self.store.db.execute("UPDATE findings SET status='approved',updated_utc=? WHERE id=?",(self.store.now(),finding_id)); self.store.log(self.case_id,"Finding approved",f"F-{finding_id:04d}"); self.store.db.commit(); self.refresh_findings(); self.refresh_overview()
+
+    def link_finding_evidence(self):
+        selected=self.finding_list.selectedItems()
+        if not selected or not self.require_case():return
+        evidence=self.store.evidence(self.case_id)
+        if not evidence:QMessageBox.information(self,"Findings","No accepted evidence is available.");return
+        labels=[f"E-{row['id']:04d} · {row['title']}" for row in evidence]
+        label,ok=QInputDialog.getItem(self,"Link supporting evidence","Evidence:",labels,0,False)
+        if not ok:return
+        evidence_id=evidence[labels.index(label)]["id"]; finding_id=selected[0].data(Qt.UserRole)
+        self.store.db.execute("INSERT OR IGNORE INTO finding_evidence(finding_id,evidence_id,role) VALUES(?,?,'supporting')",(finding_id,evidence_id)); self.store.log(self.case_id,"Evidence linked to finding",f"E-{evidence_id:04d} → F-{finding_id:04d}"); self.store.db.commit(); self.refresh_findings()
 
     def case_context(self):
         if not self.case_id: return "No active case."

@@ -47,6 +47,22 @@ class IntelStoreTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 64)
 
+    def test_review_gated_evidence_targets_findings_and_custody(self):
+        case_id = self.store.add_case("Workflow case")
+        self.store.add_target(case_id, "Domain", "example.com", "Authorized public research")
+        inbox_id = self.store.add_inbox(case_id, "Capture", "web-page", "https://example.com", digest="abc")
+        self.assertEqual(len(self.store.inbox(case_id)), 1)
+        evidence_id = self.store.accept_inbox(inbox_id)
+        finding_id = self.store.add_finding(case_id, "Related infrastructure", "Analyst-reviewed draft", "medium")
+        self.store.db.execute("INSERT INTO finding_evidence(finding_id,evidence_id,role) VALUES(?,?,'supporting')", (finding_id, evidence_id))
+        self.store.db.commit()
+        custody = self.store.db.execute("SELECT * FROM custody_events WHERE evidence_id=?", (evidence_id,)).fetchall()
+        self.assertEqual(len(self.store.targets(case_id)), 1)
+        self.assertEqual(len(self.store.evidence(case_id)), 1)
+        self.assertEqual(len(self.store.findings(case_id)), 1)
+        self.assertEqual(len(custody), 1)
+        self.assertEqual(len(custody[0]["event_hash"]), 64)
+
 
 if __name__ == "__main__":
     unittest.main()
