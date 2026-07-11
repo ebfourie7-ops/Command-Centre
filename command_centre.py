@@ -1282,6 +1282,9 @@ class SoftwarePage(QWidget):
         self.status.setObjectName("muted")
         self.tools_status = QLabel("--")
         self.tools_status.setObjectName("muted")
+        self.cachyos_pi_status = QLabel("--")
+        self.cachyos_pi_status.setObjectName("controlState")
+        self.cachyos_pi_status.setWordWrap(True)
         self.package_search = QLineEdit()
         self.package_search.setPlaceholderText("Search packages")
         self.package_search.returnPressed.connect(self.search_packages)
@@ -1421,6 +1424,24 @@ class SoftwarePage(QWidget):
     def package_panel(self):
         frame, layout = self.panel("Packages")
         layout.addWidget(self.tools_status)
+
+        curated, curated_layout = self.panel("CachyOS Curated Packages")
+        curated_body = QLabel(
+            "Browse CachyOS's Popular Applications catalogue by category, including browsers, "
+            "development, graphics, multimedia, office, gaming, and virtualization packages."
+        )
+        curated_body.setObjectName("muted")
+        curated_body.setWordWrap(True)
+        curated_layout.addWidget(curated_body)
+        curated_layout.addWidget(self.cachyos_pi_status)
+        open_curated = QPushButton("OPEN CACHYOS PACKAGE INSTALLER")
+        open_curated.clicked.connect(self.open_cachyos_package_installer)
+        curated_layout.addWidget(open_curated)
+        layout.addWidget(curated)
+
+        search_heading = QLabel("REPOSITORY PACKAGE SEARCH")
+        search_heading.setObjectName("panelTitle")
+        layout.addWidget(search_heading)
         layout.addWidget(self.package_search)
         layout.addWidget(self.package_list)
 
@@ -1603,6 +1624,28 @@ class SoftwarePage(QWidget):
         ]:
             tools.append(f"{label}: {'available' if command_exists(tool) else 'missing'}")
         self.tools_status.setText("    ".join(tools))
+        if command_exists("cachyos-pi"):
+            self.cachyos_pi_status.setText("READY  ·  cachyos-packageinstaller is installed")
+        else:
+            self.cachyos_pi_status.setText("NOT INSTALLED  ·  Install cachyos-packageinstaller to enable the curated catalogue")
+
+    def open_cachyos_package_installer(self):
+        if not command_exists("cachyos-pi"):
+            self.result.setPlainText(
+                "CachyOS Package Installer is not installed.\n\n"
+                "Install package: cachyos-packageinstaller"
+            )
+            return
+        try:
+            subprocess.Popen(["cachyos-pi"])
+        except OSError as error:
+            self.result.setPlainText(f"Unable to open CachyOS Package Installer:\n{error}")
+            return
+        self.result.setPlainText(
+            "Opened CachyOS Package Installer.\n\n"
+            "Use Popular Applications for the curated category catalogue or Repo for the full package list."
+        )
+        self.parent_window.add_history("CachyOS Package Installer opened")
 
     def clean_ansi(self, text):
         return re.sub(r"\x1b\[[0-9;]*m", "", text)
