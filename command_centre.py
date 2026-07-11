@@ -63,6 +63,7 @@ CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
 CODEX_USAGE_CONFIG = CONFIG_DIR / "codex_usage.json"
+AGENT_CONFIG_FILE = CONFIG_DIR / "agent_hub.json"
 USER_DEPLOYMENTS_CONFIG = CONFIG_DIR / "deployment_profiles.json"
 INTEL_CONFIG = CONFIG_DIR / "command_intel.json"
 CONTROL_QUEUE_FILE = CONFIG_DIR / "control_queue.json"
@@ -3172,12 +3173,16 @@ class CommandCodePage(QWidget):
         self.workspace = Path.home()
         self.open_files = {}
         self.codex_process = None
+        self.external_agent_process = None
         self.codex_last_message_path = None
         self.codex_log_buffer = ""
         self.codex_event_buffer = ""
         self.codex_answer_seen = False
         self.codex_current_answer = ""
         self.attached_files = []
+        self.agent_config = self.load_agent_config()
+        self.agent_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-provider")
+        self.agent_future = None
         self.codex_usage = {"used": 0, "limit": 0, "last_run": 0}
         self.load_codex_usage()
 
@@ -3221,10 +3226,26 @@ class CommandCodePage(QWidget):
         for label, value in [
             ("Agent", "agent"),
             ("Ask", "ask"),
+            ("Plan", "plan"),
             ("Edit", "edit"),
             ("Review", "review"),
+            ("Debug", "debug"),
         ]:
             self.codex_mode.addItem(label, value)
+        self.agent_provider = QComboBox()
+        for label, value in [("Codex", "codex"), ("Claude", "claude"), ("DeepSeek", "deepseek"), ("Ollama", "ollama"), ("Custom", "custom")]:
+            self.agent_provider.addItem(label, value)
+        configured_provider = self.agent_config.get("default_provider", "codex")
+        self.agent_provider.setCurrentIndex(max(0, self.agent_provider.findData(configured_provider)))
+        self.agent_provider.currentIndexChanged.connect(self.agent_provider_changed)
+        self.permission_preset = QComboBox()
+        self.permission_preset.addItem("Safe · read/propose", "safe")
+        self.permission_preset.addItem("Development · reviewed writes", "development")
+        self.permission_preset.addItem("Trusted Workspace", "trusted")
+        self.context_scope = QComboBox()
+        self.context_scope.addItem("Context: current file", "file")
+        self.context_scope.addItem("Context: file + Git diff", "git")
+        self.context_scope.addItem("Context: file + Git + output", "full")
         self.codex_status = QLabel("Ready")
         self.codex_status.setObjectName("muted")
         self.codex_usage_label = QLabel("--")
@@ -3236,9 +3257,16 @@ class CommandCodePage(QWidget):
         self.codex_limit_input.returnPressed.connect(self.save_codex_limit)
         self.status = QLabel("Ready")
         self.status.setObjectName("muted")
+        self.agent_poll = QTimer(self)
+        self.agent_poll.timeout.connect(self.finish_api_agent)
+        self.agent_poll.start(100)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(self.toolbar())
+        self.command_bar = QLineEdit()
+        self.command_bar.setPlaceholderText("Search files, commands and actions…")
+        self.command_bar.returnPressed.connect(self.run_command_bar)
+        command_row = QHBoxLayout(); command_row.addLayout(self.toolbar()); command_row.addWidget(self.command_bar, 1)
+        layout.addLayout(command_row)
 
         editor_split = QSplitter(Qt.Horizontal)
         editor_split.addWidget(self.explorer_panel())
@@ -3254,7 +3282,7 @@ class CommandCodePage(QWidget):
         layout.addWidget(self.status)
 
         self.open_workspace(Path("/home/eugene/Desktop/Code"))
-        self.append_chat("system", "Command Terminal ready. Choose a mode, then send a workspace prompt.")
+        self.append_chat("system", "Command Terminal Agent Hub ready. Choose a provider, mode, and permission preset.")
 
     def toolbar(self):
         row = QHBoxLayout()
@@ -3270,12 +3298,15 @@ class CommandCodePage(QWidget):
             button.clicked.connect(handler)
             row.addWidget(button)
         row.addStretch()
-        link = QPushButton("Link ChatGPT")
-        link.clicked.connect(self.link_chatgpt_account)
-        row.addWidget(link)
-        unlink = QPushButton("Unlink ChatGPT")
-        unlink.clicked.connect(self.unlink_chatgpt_account)
-        row.addWidget(unlink)
+        agents = QPushButton("Manage Agents")
+        agents.clicked.connect(self.manage_agents)
+        row.addWidget(agents)
+        git_status = QPushButton("Git Status")
+        git_status.clicked.connect(self.show_git_status)
+        row.addWidget(git_status)
+        checkpoint = QPushButton("Checkpoint")
+        checkpoint.clicked.connect(self.create_checkpoint)
+        row.addWidget(checkpoint)
         return row
 
     def explorer_panel(self):
@@ -3303,7 +3334,7 @@ class CommandCodePage(QWidget):
         frame = QFrame()
         frame.setObjectName("card")
         layout = QVBoxLayout(frame)
-        title = QLabel("CODEX CHAT")
+        title = QLabel("AGENT HUB")
         title.setObjectName("panelTitle")
         layout.addWidget(title)
 
@@ -3319,12 +3350,16 @@ class CommandCodePage(QWidget):
         layout = QVBoxLayout(tab)
         layout.setSpacing(8)
 
-        top = QHBoxLayout()
+        top = QGridLayout()
+        top.addWidget(QLabel("Provider"), 0, 0)
+        top.addWidget(self.agent_provider, 0, 1)
         mode_label = QLabel("Mode")
         mode_label.setObjectName("muted")
-        top.addWidget(mode_label)
-        top.addWidget(self.codex_mode)
-        top.addWidget(self.codex_status, 1)
+        top.addWidget(mode_label, 0, 2)
+        top.addWidget(self.codex_mode, 0, 3)
+        top.addWidget(self.permission_preset, 1, 0, 1, 2)
+        top.addWidget(self.context_scope, 1, 2, 1, 2)
+        top.addWidget(self.codex_status, 2, 0, 1, 4)
         layout.addLayout(top)
 
         layout.addWidget(self.codex_output)
@@ -3344,8 +3379,8 @@ class CommandCodePage(QWidget):
         attach.clicked.connect(self.attach_files)
         row.addWidget(attach)
         for label, handler in [
-            ("Account Status", self.codex_account_status),
-            ("Unlink", self.unlink_chatgpt_account),
+            ("Provider Status", self.provider_status),
+            ("Manage", self.manage_agents),
             ("Explain File", self.explain_current_file),
             ("Review", self.review_workspace),
             ("Stop", self.stop_codex),
@@ -3549,6 +3584,101 @@ class CommandCodePage(QWidget):
         ok, terminal = launch_terminal("Command Terminal", f"cd {json.dumps(str(self.workspace))}; exec bash")
         self.output.appendPlainText(f"Opened terminal in {terminal}." if ok else terminal)
 
+    def load_agent_config(self):
+        defaults = {"default_provider": "codex", "deepseek": {"endpoint": "https://api.deepseek.com/chat/completions", "model": "deepseek-chat"},
+                    "custom": {"endpoint": "", "model": ""}, "ollama": {"model": ""}}
+        try:
+            data = json.loads(AGENT_CONFIG_FILE.read_text(encoding="utf-8"))
+            for key, value in data.items(): defaults[key] = value
+        except Exception:
+            pass
+        return defaults
+
+    def save_agent_config(self):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        AGENT_CONFIG_FILE.write_text(json.dumps(self.agent_config, indent=2), encoding="utf-8")
+
+    def secret_key(self, provider):
+        if not command_exists("secret-tool"):
+            return ""
+        return run_text(["secret-tool", "lookup", "application", "command-centre", "provider", provider], 3)[0]
+
+    def store_secret_key(self, provider, secret):
+        if not command_exists("secret-tool"):
+            QMessageBox.warning(self, "Secure storage unavailable", "Install libsecret/secret-tool before configuring API credentials. Keys will not be stored in plaintext.")
+            return False
+        try:
+            result = subprocess.run(["secret-tool", "store", "--label", f"Command Centre {provider} API key", "application", "command-centre", "provider", provider], input=secret, text=True, timeout=10)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def provider_state(self, provider):
+        if provider == "codex": return "CLI detected" if self.codex_command() else "CLI missing"
+        if provider == "claude": return "CLI detected" if command_exists("claude") else "CLI missing"
+        if provider == "ollama": return "Local runtime detected" if command_exists("ollama") else "Local runtime missing"
+        config = self.agent_config.get(provider, {})
+        return f"Endpoint configured · {'credential stored' if self.secret_key(provider) else 'credential missing'}" if config.get("endpoint") else "Endpoint missing"
+
+    def manage_agents(self):
+        provider, ok = QInputDialog.getItem(self, "Manage Agents", "Provider:", ["Codex", "Claude", "DeepSeek", "Ollama", "Custom"], self.agent_provider.currentIndex(), False)
+        if not ok: return
+        key = provider.lower()
+        if key == "codex":
+            self.link_chatgpt_account(); return
+        if key == "claude":
+            if not command_exists("claude"):
+                QMessageBox.information(self, "Claude", "Claude CLI was not detected. Install it using its official instructions before linking it here."); return
+            ok, terminal = launch_terminal("Claude Authentication", "claude; echo; read -n 1 -s -r -p 'Press any key to close...' ")
+            self.append_chat("system", f"Opened Claude CLI in {terminal}. Complete provider-owned authentication there." if ok else terminal); return
+        if key == "ollama":
+            model, ok = QInputDialog.getText(self, "Ollama", "Default local model:", text=self.agent_config["ollama"].get("model", ""))
+            if ok: self.agent_config["ollama"]["model"] = model.strip(); self.save_agent_config()
+            return
+        current = self.agent_config.get(key, {})
+        endpoint, ok = QInputDialog.getText(self, f"{provider} endpoint", "OpenAI-compatible chat completions endpoint:", text=current.get("endpoint", ""))
+        if not ok: return
+        model, ok = QInputDialog.getText(self, f"{provider} model", "Model ID:", text=current.get("model", ""))
+        if not ok: return
+        secret, ok = QInputDialog.getText(self, f"{provider} credential", "API key (stored in system keyring):", QLineEdit.Password)
+        if not ok or not secret.strip(): return
+        if self.store_secret_key(key, secret.strip()):
+            self.agent_config[key] = {"endpoint": endpoint.strip(), "model": model.strip()}; self.save_agent_config(); self.append_chat("system", f"{provider} configured. Credential stored by the system keyring.")
+
+    def provider_status(self):
+        provider = self.agent_provider.currentData() or "codex"
+        if provider == "codex": self.codex_account_status(); return
+        self.append_chat("system", f"{self.agent_provider.currentText()}\n{self.provider_state(provider)}")
+
+    def agent_provider_changed(self):
+        provider = self.agent_provider.currentData() or "codex"
+        self.agent_config["default_provider"] = provider; self.save_agent_config()
+        self.codex_status.setText(self.provider_state(provider))
+        self.codex_prompt.setPlaceholderText(f"Message {self.agent_provider.currentText()}")
+
+    def run_command_bar(self):
+        query = self.command_bar.text().strip()
+        if not query: return
+        self.command_bar.clear()
+        matches = [path for path in self.workspace.rglob("*") if path.is_file() and query.lower() in path.name.lower()][:30]
+        if matches: self.open_file(matches[0]); self.status.setText(f"Opened command-bar match: {matches[0].name}")
+        else: self.status.setText(f"No workspace file matched: {query}")
+
+    def show_git_status(self):
+        output, error, code = run_text(["git", "-C", str(self.workspace), "status", "--short", "--branch"], 5)
+        self.output.setPlainText(output or error or ("Clean working tree" if code == 0 else "Not a Git workspace"))
+
+    def create_checkpoint(self):
+        patch, error, code = run_text(["git", "-C", str(self.workspace), "diff", "--binary", "HEAD"], 8)
+        if code != 0:
+            self.output.appendPlainText(error or "Unable to create Git patch checkpoint."); return
+        checkpoint_dir = CONFIG_DIR / "checkpoints"; checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = checkpoint_dir / f"workspace-{time.strftime('%Y%m%d-%H%M%S')}.patch"
+        path.write_text(patch, encoding="utf-8")
+        untracked = run_text(["git", "-C", str(self.workspace), "ls-files", "--others", "--exclude-standard"], 5)[0]
+        note = f"\nUntracked files are listed but not copied:\n{untracked}" if untracked else ""
+        self.output.appendPlainText(f"Tracked-file checkpoint saved without changing the working tree:\n{path}{note}")
+
     def codex_command(self):
         return ensure_codex_on_path()
 
@@ -3650,6 +3780,19 @@ class CommandCodePage(QWidget):
             content = content[:12000] + "\n...[truncated]"
         return f"\n\nCurrent file: {path}\n\n```text\n{content}\n```"
 
+    def managed_context(self):
+        context = self.current_file_context()
+        scope = self.context_scope.currentData() or "file"
+        if scope in ("git", "full"):
+            diff = run_text(["git", "-C", str(self.workspace), "diff", "--", "."], 8)[0]
+            if diff:
+                context += f"\n\nCurrent Git diff (clipped):\n```diff\n{diff[:20000]}\n```"
+        if scope == "full":
+            output = self.output.toPlainText()[-12000:]
+            if output:
+                context += f"\n\nRecent Command Terminal output:\n```text\n{output}\n```"
+        return context
+
     def attach_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Attach files", str(self.workspace), "All files (*)")
         if not files:
@@ -3735,6 +3878,9 @@ class CommandCodePage(QWidget):
                 "You are in Ask mode inside Command Terminal. Answer and explain using workspace context, "
                 "but do not edit files or run changing commands unless the user explicitly asks you to switch modes."
             ),
+            "plan": (
+                "You are in Plan mode. Inspect only the supplied context and produce a concrete implementation plan. Do not modify files or run commands."
+            ),
             "edit": (
                 "You are in Edit mode inside Command Terminal. Focus on implementing the requested change in the workspace. "
                 "Keep edits scoped, preserve existing style, and run reasonable checks."
@@ -3743,13 +3889,20 @@ class CommandCodePage(QWidget):
                 "You are in Review mode inside Command Terminal. Use a code-review stance: findings first, ordered by severity, "
                 "with file references where possible. Do not rewrite code unless explicitly requested."
             ),
+            "debug": (
+                "You are in Debug mode. Diagnose the reported problem using supplied code and output. Propose focused checks and fixes; do not modify files unless explicitly approved."
+            ),
         }
-        return f"{instructions.get(mode, instructions['agent'])}\n\nUser request:\n{user_prompt}"
+        permission = self.permission_preset.currentData() or "safe"
+        permission_text = {"safe":"FILES: read supplied context and propose only. TERMINAL: disabled. NETWORK: provider request only. GIT: no writes.",
+                           "development":"FILES: workspace changes require review. TERMINAL: project commands require approval. SUDO: prohibited. GIT PUSH: prohibited.",
+                           "trusted":"FILES: workspace only. TERMINAL: reviewed commands. NETWORK: allowed when provider supports it. SUDO and privileged system changes: prohibited."}[permission]
+        return f"{instructions.get(mode, instructions['agent'])}\n\nCommand Terminal permission preset: {permission.upper()}\n{permission_text}\n\nUser request:\n{user_prompt}"
 
     def append_chat(self, role, message):
         role_labels = {
             "user": "You",
-            "assistant": "Codex",
+            "assistant": self.agent_provider.currentText() if hasattr(self, "agent_provider") else "Agent",
             "system": "Command Terminal",
             "tool": "Tool",
         }
@@ -3781,10 +3934,10 @@ class CommandCodePage(QWidget):
     def ask_codex(self):
         prompt = self.codex_prompt.toPlainText().strip()
         if not prompt:
-            self.append_chat("system", "Type a prompt for Codex first.")
+            self.append_chat("system", "Type a prompt for the selected agent first.")
             return
         self.codex_prompt.clear()
-        self.run_codex(self.mode_prompt(prompt) + self.current_file_context() + self.attachment_context(), prompt)
+        self.run_agent(self.mode_prompt(prompt) + self.managed_context() + self.attachment_context(), prompt)
 
     def explain_current_file(self):
         editor = self.current_editor()
@@ -3793,12 +3946,68 @@ class CommandCodePage(QWidget):
             return
         self.set_codex_mode("ask")
         question = "Explain the current file."
-        self.run_codex("Explain this file clearly and point out important functions, risks, and next improvements." + self.current_file_context(), question)
+        self.run_agent("Explain this file clearly and point out important functions, risks, and next improvements." + self.current_file_context(), question)
 
     def review_workspace(self):
         self.set_codex_mode("review")
         question = "Review this workspace."
-        self.run_codex(self.mode_prompt("Review this workspace for likely bugs, missing tests, and risky implementation choices."), question)
+        self.run_agent(self.mode_prompt("Review this workspace for likely bugs, missing tests, and risky implementation choices."), question)
+
+    def run_agent(self, prompt, display_question=None):
+        provider = self.agent_provider.currentData() or "codex"
+        if provider == "codex":
+            self.run_codex(prompt, display_question); return
+        if provider == "claude":
+            if not command_exists("claude"): self.append_chat("system", "Claude CLI was not found."); return
+            self.run_external_agent("claude", ["-p", prompt], display_question); return
+        if provider == "ollama":
+            if not command_exists("ollama"): self.append_chat("system", "Ollama was not found."); return
+            model = self.agent_config.get("ollama", {}).get("model", "")
+            if not model:
+                rows = run_text(["ollama", "list"], 8)[0].splitlines()[1:]
+                model = rows[0].split()[0] if rows else ""
+            if not model: self.append_chat("system", "Configure or download an Ollama model first."); return
+            self.run_external_agent("ollama", ["run", model, prompt], display_question); return
+        if self.agent_future is not None:
+            self.append_chat("system", "An API agent request is already running."); return
+        config = self.agent_config.get(provider, {})
+        secret = self.secret_key(provider)
+        if not config.get("endpoint") or not config.get("model") or not secret:
+            self.append_chat("system", f"Configure {self.agent_provider.currentText()} in Manage Agents first."); return
+        self.append_chat("user", f"[{self.codex_mode.currentText()}] {display_question or 'Agent request'}")
+        self.codex_status.setText(f"Running {self.agent_provider.currentText()}")
+        self.agent_future = self.agent_executor.submit(self.call_api_agent, config, secret, prompt)
+
+    def run_external_agent(self, program, arguments, display_question):
+        if self.external_agent_process and self.external_agent_process.state() != QProcess.NotRunning:
+            self.append_chat("system", "An external agent is already running."); return
+        self.append_chat("user", f"[{self.codex_mode.currentText()}] {display_question or 'Agent request'}")
+        self.codex_status.setText(f"Running {self.agent_provider.currentText()}")
+        self.external_agent_process = QProcess(self); self.external_agent_process.setWorkingDirectory(str(self.workspace)); self.external_agent_process.setProgram(program); self.external_agent_process.setArguments(arguments)
+        self.external_agent_process.finished.connect(self.external_agent_finished); self.external_agent_process.start()
+
+    def external_agent_finished(self, code, status):
+        output = bytes(self.external_agent_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        error = bytes(self.external_agent_process.readAllStandardError()).decode("utf-8", errors="replace")
+        self.append_chat("assistant" if output else "system", output.strip() or error.strip() or f"Agent exited with code {code}")
+        self.codex_status.setText("Ready")
+
+    def call_api_agent(self, config, secret, prompt):
+        payload = json.dumps({"model": config["model"], "messages": [{"role": "user", "content": prompt}], "stream": False}).encode("utf-8")
+        request = urllib.request.Request(config["endpoint"], data=payload, method="POST", headers={"Content-Type":"application/json", "Authorization":f"Bearer {secret}"})
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "Provider returned no message.")
+        except Exception as error:
+            return f"Provider request failed: {error}"
+
+    def finish_api_agent(self):
+        if self.agent_future is None or not self.agent_future.done(): return
+        future = self.agent_future; self.agent_future = None
+        try: message = future.result()
+        except Exception as error: message = f"Provider request failed: {error}"
+        self.append_chat("assistant", message); self.codex_status.setText("Ready")
 
     def run_codex(self, prompt, display_question=None):
         command = self.codex_command()
@@ -3830,7 +4039,7 @@ class CommandCodePage(QWidget):
             str(self.workspace),
             "--skip-git-repo-check",
             "--sandbox",
-            "danger-full-access",
+            "read-only" if (self.permission_preset.currentData() == "safe" or self.selected_codex_mode() in ("ask", "plan", "review", "debug")) else "workspace-write",
             "--color",
             "never",
             "--output-last-message",
@@ -3933,6 +4142,12 @@ class CommandCodePage(QWidget):
             self.codex_process.kill()
             self.codex_status.setText("Stopped")
             self.append_chat("system", "Codex stopped.")
+        if self.external_agent_process and self.external_agent_process.state() != QProcess.NotRunning:
+            self.external_agent_process.kill(); self.codex_status.setText("Stopped"); self.append_chat("system", "External agent stopped.")
+
+    def shutdown(self):
+        self.stop_codex()
+        self.agent_executor.shutdown(wait=False, cancel_futures=True)
 
     def eventFilter(self, watched, event):
         if watched is self.codex_prompt and event.type() == event.Type.KeyPress:
@@ -5507,6 +5722,9 @@ class MainWindow(QMainWindow):
         software_page = self.pages.get("software")
         if software_page and hasattr(software_page, "shutdown"):
             software_page.shutdown()
+        command_page = self.pages.get("command_code")
+        if command_page and hasattr(command_page, "shutdown"):
+            command_page.shutdown()
         self.probe_executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
