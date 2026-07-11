@@ -1,6 +1,6 @@
 pkgname=command-centre
 pkgver=0.8.0
-pkgrel=3
+pkgrel=4
 pkgdesc="CommandOS operations dashboard and Command Intel investigation workspace"
 arch=('any')
 url="https://localhost/command-centre"
