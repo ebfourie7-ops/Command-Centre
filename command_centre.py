@@ -2697,7 +2697,7 @@ class OfflineKnowledgePage(QWidget):
         for label, handler in [("BACK", self.reader.back), ("FORWARD", self.reader.forward), ("HOME", self.reader_home),
                                ("FIND", self.find_in_page), ("ZOOM -", lambda: self.adjust_zoom(-0.1)),
                                ("ZOOM +", lambda: self.adjust_zoom(0.1)), ("BOOKMARK", self.add_bookmark),
-                               ("EXTERNAL", self.open_reader_browser)]:
+                               ("EXTERNAL", self.open_reader_browser), ("FULLSCREEN", self.open_fullscreen_reader)]:
             button = QPushButton(label)
             button.clicked.connect(handler)
             toolbar.addWidget(button)
@@ -3109,7 +3109,7 @@ class OfflineKnowledgePage(QWidget):
         if not self.reader_url:
             self.result.setPlainText("Open a ZIM file first.")
             return
-        dialog = ReaderFullscreenDialog(self.reader.url() if self.reader.url().isValid() else self.reader_url, self.reader_title, self)
+        dialog = ReaderFullscreenDialog(self.reader_url, self.reader_title, self)
         dialog.showFullScreen()
         dialog.exec()
 
