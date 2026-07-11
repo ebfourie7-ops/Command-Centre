@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,7 @@ STATE_FILE = Path.home() / ".local/state/telemetry/telemetry.json"
 TELEMETRY_URL = "http://127.0.0.1:9090/telemetry"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
+OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
 CODEX_USAGE_CONFIG = CONFIG_DIR / "codex_usage.json"
 USER_DEPLOYMENTS_CONFIG = CONFIG_DIR / "deployment_profiles.json"
 INTEL_CONFIG = CONFIG_DIR / "command_intel.json"
@@ -2566,12 +2568,14 @@ class OfflineKnowledgePage(QWidget):
         self.parent_window = parent_window
         self.locations = []
         self.zim_files = []
+        self.knowledge_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="knowledge-index")
+        self.scan_future = None
         self.kiwix_process = None
         self.kiwix_port = None
         self.reader_url = None
         self.reader_title = "Offline Knowledge Reader"
         self.reader_started_at = 0
-        self.library_button = QPushButton("Select ZIM Library Location")
+        self.library_button = QPushButton("Add Knowledge Library")
         self.library_button.clicked.connect(self.select_library_location)
         self.fullscreen_button = QPushButton("Full Screen Reader")
         self.fullscreen_button.clicked.connect(self.open_fullscreen_reader)
@@ -2582,19 +2586,54 @@ class OfflineKnowledgePage(QWidget):
         self.library_label = QLabel("No ZIM library selected.")
         self.library_label.setObjectName("muted")
         self.zim_list = QListWidget()
+        self.zim_list.itemDoubleClicked.connect(lambda _: self.open_selected_library_item())
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search all offline knowledge…")
+        self.search_input.returnPressed.connect(self.search_knowledge)
+        self.search_results = QListWidget()
+        self.search_results.itemDoubleClicked.connect(lambda _: self.open_search_result())
+        self.bookmark_list = QListWidget()
+        self.bookmark_list.itemDoubleClicked.connect(lambda _: self.open_bookmark())
+        self.home_status = QLabel("Preparing local knowledge engine…")
+        self.home_status.setObjectName("controlState")
+        self.home_status.setWordWrap(True)
+        self.storage_status = QLabel("--")
+        self.storage_status.setObjectName("muted")
+        self.storage_status.setWordWrap(True)
+        self.reader_location = QLabel("No document open")
+        self.reader_location.setObjectName("muted")
+        self.reader_location.setWordWrap(True)
+        self.current_document = None
         self.reader = QWebEngineView()
         self.reader.setMinimumHeight(420)
+        self.reader.setHtml("<html><body style='background:#071019;color:#9fb3c3;font-family:sans-serif;padding:40px'><h2>Offline reader ready</h2><p>Open a local knowledge item or search your libraries.</p></body></html>")
         self.result = QTextEdit()
         self.result.setReadOnly(True)
         self.result.setObjectName("textPanel")
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.library_panel())
-        layout.addWidget(self.zim_list)
-        layout.addWidget(self.reader)
+        title = QLabel("OFFLINE KNOWLEDGE")
+        title.setObjectName("healthHeader")
+        layout.addWidget(title)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search_input, 1)
+        search_button = QPushButton("SEARCH")
+        search_button.clicked.connect(self.search_knowledge)
+        search_row.addWidget(search_button)
+        layout.addLayout(search_row)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.home_page(), "Home")
+        self.tabs.addTab(self.libraries_page(), "Libraries")
+        self.tabs.addTab(self.search_page(), "Search")
+        self.tabs.addTab(self.reader_page(), "Reader")
+        self.tabs.addTab(self.bookmarks_page(), "Bookmarks")
+        layout.addWidget(self.tabs, 1)
         layout.addWidget(self.result)
 
-        self.zim_list.itemClicked.connect(lambda _: self.open_selected_zim())
+        self.initialize_knowledge_db()
+        self.scan_poll = QTimer(self)
+        self.scan_poll.timeout.connect(self.finish_scan)
+        self.scan_poll.start(100)
         self.load_config()
         self.scan_locations()
 
@@ -2608,7 +2647,7 @@ class OfflineKnowledgePage(QWidget):
         return frame, layout
 
     def library_panel(self):
-        frame, layout = self.panel("Offline Knowledge")
+        frame, layout = self.panel("Knowledge Libraries")
         row = QHBoxLayout()
         row.addWidget(self.library_button)
         row.addWidget(self.fullscreen_button)
@@ -2617,6 +2656,65 @@ class OfflineKnowledgePage(QWidget):
         layout.addLayout(row)
         layout.addWidget(self.library_label)
         return frame
+
+    def home_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        readiness, readiness_layout = self.panel("Offline Readiness")
+        readiness_layout.addWidget(self.home_status)
+        layout.addWidget(readiness)
+        storage, storage_layout = self.panel("Knowledge Storage")
+        storage_layout.addWidget(self.storage_status)
+        layout.addWidget(storage)
+        recent, recent_layout = self.panel("Recently Viewed")
+        self.recent_list = QListWidget()
+        self.recent_list.itemDoubleClicked.connect(lambda _: self.open_recent())
+        recent_layout.addWidget(self.recent_list)
+        layout.addWidget(recent)
+        return page
+
+    def libraries_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.library_panel())
+        layout.addWidget(self.zim_list)
+        return page
+
+    def search_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        note = QLabel("Searches local titles, paths, and indexed text. ZIM content remains searchable inside its Kiwix reader until article-level indexing is available.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(self.search_results)
+        return page
+
+    def reader_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        toolbar = QHBoxLayout()
+        for label, handler in [("BACK", self.reader.back), ("FORWARD", self.reader.forward), ("HOME", self.reader_home),
+                               ("FIND", self.find_in_page), ("ZOOM -", lambda: self.adjust_zoom(-0.1)),
+                               ("ZOOM +", lambda: self.adjust_zoom(0.1)), ("BOOKMARK", self.add_bookmark),
+                               ("EXTERNAL", self.open_reader_browser)]:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            toolbar.addWidget(button)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+        layout.addWidget(self.reader_location)
+        layout.addWidget(self.reader, 1)
+        return page
+
+    def bookmarks_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.bookmark_list)
+        remove = QPushButton("REMOVE SELECTED BOOKMARK")
+        remove.clicked.connect(self.remove_bookmark)
+        layout.addWidget(remove)
+        return page
 
     def load_config(self):
         try:
@@ -2632,59 +2730,259 @@ class OfflineKnowledgePage(QWidget):
 
     def render_library_location(self):
         if self.locations:
-            self.library_label.setText(str(self.locations[0]))
+            self.library_label.setText("\n".join(str(path) for path in self.locations))
         else:
-            self.library_label.setText("No ZIM library selected.")
+            self.library_label.setText("No Knowledge Library configured.")
 
     def select_library_location(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select ZIM library location", str(Path.home()))
+        folder = QFileDialog.getExistingDirectory(self, "Add Knowledge Library", str(Path.home()))
         if folder:
-            self.locations = [Path(folder).expanduser()]
+            path = Path(folder).expanduser()
+            if path not in self.locations:
+                self.locations.append(path)
             self.save_config()
             self.render_library_location()
             self.scan_locations()
 
     def scan_locations(self):
-        files = []
-        seen = set()
-        for location in self.locations:
-            if location.is_file() and location.suffix.lower() == ".zim":
-                candidates = [location]
-            elif location.is_dir():
-                candidates = location.rglob("*.zim")
-            else:
-                candidates = []
+        if self.scan_future is None:
+            self.home_status.setText("INDEXING  ·  Knowledge remains available while background discovery runs.")
+            self.scan_future = self.knowledge_executor.submit(self.index_locations, list(self.locations))
 
-            for candidate in candidates:
-                try:
-                    resolved = candidate.resolve()
-                except OSError:
+    def initialize_knowledge_db(self):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS libraries (
+                    id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+                    available INTEGER NOT NULL DEFAULT 0, last_scan TEXT, total_size INTEGER NOT NULL DEFAULT 0,
+                    document_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS documents (
+                    id INTEGER PRIMARY KEY, library_path TEXT NOT NULL, path TEXT UNIQUE NOT NULL,
+                    title TEXT NOT NULL, format TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL,
+                    content TEXT NOT NULL DEFAULT '', available INTEGER NOT NULL DEFAULT 1, indexed_at TEXT
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS document_search USING fts5(title, path, content, content='documents', content_rowid='id');
+                CREATE TABLE IF NOT EXISTS bookmarks (
+                    id INTEGER PRIMARY KEY, document_path TEXT NOT NULL, title TEXT NOT NULL, locator TEXT,
+                    note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(document_path, locator)
+                );
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY, document_path TEXT NOT NULL, title TEXT NOT NULL,
+                    locator TEXT, viewed_at TEXT NOT NULL
+                );
+            """)
+
+    def index_locations(self, locations):
+        supported = {".zim": "ZIM", ".pdf": "PDF", ".epub": "EPUB", ".html": "HTML", ".htm": "HTML",
+                     ".md": "MARKDOWN", ".markdown": "MARKDOWN", ".txt": "TEXT"}
+        indexed = 0
+        failures = []
+        zim_files = []
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.execute("UPDATE libraries SET available=0")
+            db.execute("UPDATE documents SET available=0")
+            for location in locations:
+                root = Path(location).expanduser()
+                if not root.exists():
                     continue
-                if resolved not in seen:
-                    seen.add(resolved)
-                    files.append(resolved)
+                candidates = [root] if root.is_file() else root.rglob("*")
+                library_size = 0
+                library_count = 0
+                for candidate in candidates:
+                    try:
+                        if not candidate.is_file() or candidate.suffix.lower() not in supported:
+                            continue
+                        resolved = candidate.resolve()
+                        stat = resolved.stat()
+                        fmt = supported[resolved.suffix.lower()]
+                        content = self.extract_index_text(resolved, fmt, stat.st_size)
+                        title = resolved.stem.replace("_", " ").replace("-", " ").strip() or resolved.name
+                        existing = db.execute("SELECT id,mtime,size FROM documents WHERE path=?", (str(resolved),)).fetchone()
+                        if existing and existing[1] == stat.st_mtime and existing[2] == stat.st_size:
+                            db.execute("UPDATE documents SET available=1 WHERE id=?", (existing[0],))
+                        else:
+                            if existing:
+                                db.execute("DELETE FROM document_search WHERE rowid=?", (existing[0],))
+                                db.execute("UPDATE documents SET library_path=?,title=?,format=?,size=?,mtime=?,content=?,available=1,indexed_at=? WHERE id=?",
+                                           (str(root), title, fmt, stat.st_size, stat.st_mtime, content, time.strftime("%Y-%m-%d %H:%M:%S"), existing[0]))
+                                doc_id = existing[0]
+                            else:
+                                cursor = db.execute("INSERT INTO documents(library_path,path,title,format,size,mtime,content,available,indexed_at) VALUES(?,?,?,?,?,?,?,1,?)",
+                                                    (str(root), str(resolved), title, fmt, stat.st_size, stat.st_mtime, content, time.strftime("%Y-%m-%d %H:%M:%S")))
+                                doc_id = cursor.lastrowid
+                            db.execute("INSERT INTO document_search(rowid,title,path,content) VALUES(?,?,?,?)", (doc_id, title, str(resolved), content))
+                        if fmt == "ZIM":
+                            zim_files.append(str(resolved))
+                        library_size += stat.st_size
+                        library_count += 1
+                        indexed += 1
+                    except Exception as error:
+                        failures.append(f"{candidate}: {error}")
+                db.execute("INSERT INTO libraries(path,name,available,last_scan,total_size,document_count) VALUES(?,?,1,?,?,?) "
+                           "ON CONFLICT(path) DO UPDATE SET name=excluded.name,available=1,last_scan=excluded.last_scan,total_size=excluded.total_size,document_count=excluded.document_count",
+                           (str(root), root.name or str(root), time.strftime("%Y-%m-%d %H:%M:%S"), library_size, library_count))
+            db.commit()
+            stats = db.execute("SELECT COUNT(*),COALESCE(SUM(size),0),SUM(CASE WHEN available=1 THEN 1 ELSE 0 END) FROM documents").fetchone()
+        return {"indexed": indexed, "failures": failures[:20], "zim_files": zim_files, "stats": stats}
 
-        self.zim_files = sorted(files, key=lambda item: item.name.lower())
+    def extract_index_text(self, path, fmt, size):
+        if fmt == "PDF" and size <= 50 * 1024 * 1024 and command_exists("pdftotext"):
+            output, _, code = run_text(["pdftotext", "-f", "1", "-l", "200", str(path), "-"], 25)
+            return output[:500000] if code == 0 else ""
+        if fmt not in ("TEXT", "MARKDOWN", "HTML") or size > 2 * 1024 * 1024:
+            return ""
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if fmt == "HTML":
+            text = re.sub(r"<script\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
+            text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = html.unescape(text)
+        return text[:500000]
+
+    def finish_scan(self):
+        if self.scan_future is None or not self.scan_future.done():
+            return
+        future = self.scan_future
+        self.scan_future = None
+        try:
+            scan = future.result()
+        except Exception as error:
+            self.home_status.setText(f"INDEX FAILED  ·  {error}")
+            return
+        self.zim_files = sorted((Path(path) for path in scan["zim_files"]), key=lambda item: item.name.lower())
         self.render_zim_files()
-        self.result.setPlainText(f"Found {len(self.zim_files)} ZIM file(s).")
+        self.refresh_knowledge_summary()
+        self.result.setPlainText(f"Indexed {scan['indexed']} supported document(s)." + (f"\n\n{len(scan['failures'])} indexing warning(s):\n" + "\n".join(scan["failures"]) if scan["failures"] else ""))
 
     def render_zim_files(self):
         self.zim_list.clear()
-        for zim in self.zim_files:
-            size_gb = zim.stat().st_size / 1073741824 if zim.exists() else 0
-            item = QListWidgetItem(f"{zim.name}\n{size_gb:.2f} GB - {zim.parent}")
-            item.setData(Qt.UserRole, zim)
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            rows = db.execute("SELECT path,title,format,size,indexed_at FROM documents WHERE available=1 ORDER BY title COLLATE NOCASE").fetchall()
+        for path, title, fmt, size, indexed_at in rows:
+            item = QListWidgetItem(f"{title.upper()}\n{fmt}  ·  {self.format_size(size)}  ·  AVAILABLE OFFLINE\n{path}")
+            item.setData(Qt.UserRole, {"path": path, "title": title, "format": fmt, "size": size, "indexed_at": indexed_at})
             self.zim_list.addItem(item)
+
+    def format_size(self, size):
+        value = float(size or 0)
+        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+            if value < 1024 or unit == "TiB":
+                return f"{value:.1f} {unit}"
+            value /= 1024
+        return f"{value:.1f} TiB"
 
     def selected_zim(self):
         selected = self.zim_list.selectedItems()
-        return selected[0].data(Qt.UserRole) if selected else None
+        if not selected:
+            return None
+        data = selected[0].data(Qt.UserRole)
+        return Path(data["path"]) if isinstance(data, dict) and data.get("format") == "ZIM" else None
+
+    def open_selected_library_item(self):
+        selected = self.zim_list.selectedItems()
+        if not selected:
+            return
+        document = selected[0].data(Qt.UserRole)
+        self.open_document(document)
+
+    def refresh_knowledge_summary(self):
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            documents, total_size, available = db.execute("SELECT COUNT(*),COALESCE(SUM(size),0),SUM(CASE WHEN available=1 THEN 1 ELSE 0 END) FROM documents").fetchone()
+            libraries = db.execute("SELECT COUNT(*) FROM libraries WHERE available=1").fetchone()[0]
+            indexed_text = db.execute("SELECT COUNT(*) FROM documents WHERE available=1 AND length(content)>0").fetchone()[0]
+            recent = db.execute("SELECT document_path,title,locator,viewed_at FROM history ORDER BY id DESC LIMIT 12").fetchall()
+            bookmarks = db.execute("SELECT id,document_path,title,locator,created_at FROM bookmarks ORDER BY id DESC").fetchall()
+        free = shutil.disk_usage(CONFIG_DIR).free
+        readiness = "READY" if available else "NOT CONFIGURED"
+        self.home_status.setText(f"LOCAL LIBRARY  {readiness}\nLIBRARIES      {libraries}\nDOCUMENTS      {available or 0} AVAILABLE / {documents} KNOWN\nFULL TEXT      {indexed_text} INDEXED\nZIM BACKEND    {'READY' if command_exists('kiwix-serve') else 'MISSING'}\nLOCAL AI       {'AVAILABLE' if command_exists('ollama') else 'OFFLINE'}")
+        index_size = OFFLINE_DB_FILE.stat().st_size if OFFLINE_DB_FILE.exists() else 0
+        self.storage_status.setText(f"KNOWLEDGE DATA  {self.format_size(total_size)}\nSEARCH DATABASE {self.format_size(index_size)}\nAVAILABLE       {self.format_size(free)}\nQuick integrity checks use file availability, size, and modification time. Full SHA-256 verification is not yet scheduled.")
+        self.recent_list.clear()
+        for path, title, locator, viewed_at in recent:
+            item = QListWidgetItem(f"{title}\n{viewed_at}  ·  {path}")
+            item.setData(Qt.UserRole, {"path": path, "title": title, "locator": locator})
+            self.recent_list.addItem(item)
+        self.bookmark_list.clear()
+        for bookmark_id, path, title, locator, created_at in bookmarks:
+            item = QListWidgetItem(f"★  {title}\n{created_at}  ·  {path}")
+            item.setData(Qt.UserRole, {"id": bookmark_id, "path": path, "title": title, "locator": locator})
+            self.bookmark_list.addItem(item)
+
+    def search_knowledge(self):
+        query = self.search_input.text().strip()
+        if len(query) < 2:
+            self.result.setPlainText("Enter at least two characters to search offline knowledge.")
+            return
+        tokens = [token for token in re.findall(r"[\w-]+", query) if token]
+        fts_query = " AND ".join(f'"{token}"' for token in tokens)
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            try:
+                rows = db.execute("SELECT d.path,d.title,d.format,d.size,snippet(document_search,2,'[',']',' … ',18) "
+                                  "FROM document_search JOIN documents d ON d.id=document_search.rowid "
+                                  "WHERE document_search MATCH ? AND d.available=1 ORDER BY rank LIMIT 100", (fts_query,)).fetchall()
+            except sqlite3.Error:
+                pattern = f"%{query}%"
+                rows = db.execute("SELECT path,title,format,size,substr(content,1,240) FROM documents WHERE available=1 AND (title LIKE ? OR path LIKE ? OR content LIKE ?) LIMIT 100",
+                                  (pattern, pattern, pattern)).fetchall()
+        self.search_results.clear()
+        for path, title, fmt, size, snippet in rows:
+            item = QListWidgetItem(f"{title.upper()}  ·  {fmt}  ·  {self.format_size(size)}\n{(snippet or 'Metadata match').replace(chr(10), ' ')}\n{path}")
+            item.setData(Qt.UserRole, {"path": path, "title": title, "format": fmt, "size": size})
+            self.search_results.addItem(item)
+        self.tabs.setCurrentWidget(self.search_results.parentWidget())
+        self.result.setPlainText(f"Found {len(rows)} offline result(s) for: {query}")
+        if rows:
+            self.search_results.item(0).setSelected(True)
+
+    def open_search_result(self):
+        selected = self.search_results.selectedItems()
+        if selected:
+            self.open_document(selected[0].data(Qt.UserRole))
 
     def open_selected_zim(self):
         zim = self.selected_zim()
         if not zim:
             self.result.setPlainText("Select a ZIM file first.")
             return
+        self.start_zim_reader(zim)
+
+    def open_document(self, document):
+        if not document:
+            return
+        path = Path(document.get("path", ""))
+        if not path.exists():
+            self.result.setPlainText(f"Knowledge source is currently unavailable:\n{path}")
+            return
+        fmt = document.get("format") or path.suffix.lstrip(".").upper()
+        self.current_document = {"path": str(path), "title": document.get("title", path.stem), "format": fmt}
+        self.reader_title = self.current_document["title"]
+        self.reader_location.setText(f"{self.reader_title}  ·  {fmt}  ·  {path}")
+        if fmt == "ZIM":
+            self.start_zim_reader(path)
+        elif fmt in ("TEXT", "MARKDOWN"):
+            self.record_view(self.current_document)
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            body = html.escape(text)
+            self.reader.setHtml(f"<html><body style='background:#071019;color:#dcebf5;font-family:monospace;white-space:pre-wrap;padding:28px'>{body}</body></html>", QUrl.fromLocalFile(str(path.parent) + "/"))
+            self.reader_url = QUrl.fromLocalFile(str(path))
+        elif fmt in ("HTML", "PDF"):
+            self.record_view(self.current_document)
+            self.reader_url = QUrl.fromLocalFile(str(path))
+            self.reader.load(self.reader_url)
+        else:
+            self.record_view(self.current_document)
+            self.reader.setHtml("<html><body style='background:#071019;color:#dcebf5;padding:28px'><h2>External reader required</h2><p>This format is indexed by metadata and can be opened externally.</p></body></html>")
+            self.reader_url = QUrl.fromLocalFile(str(path))
+        self.tabs.setCurrentIndex(3)
+        self.fullscreen_button.setEnabled(True)
+        self.browser_button.setEnabled(True)
+
+    def start_zim_reader(self, zim):
+        self.current_document = {"path": str(zim), "title": zim.stem, "format": "ZIM"}
+        self.reader_location.setText(f"{zim.stem}  ·  ZIM  ·  {zim}")
+        self.record_view(self.current_document)
 
         if not command_exists("kiwix-serve"):
             self.reader.setHtml(
@@ -2713,6 +3011,62 @@ class OfflineKnowledgePage(QWidget):
         )
         QTimer.singleShot(500, self.load_reader)
         self.result.setPlainText(f"Starting reader for:\n{zim}\n\nLarge ZIM files can take a few seconds to become ready.")
+
+    def record_view(self, document):
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.execute("INSERT INTO history(document_path,title,locator,viewed_at) VALUES(?,?,?,?)",
+                       (document["path"], document["title"], self.reader.url().toString(), time.strftime("%Y-%m-%d %H:%M:%S")))
+            db.execute("DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY id DESC LIMIT 200)")
+            db.commit()
+        self.refresh_knowledge_summary()
+
+    def reader_home(self):
+        if self.reader_url:
+            self.reader.load(self.reader_url)
+
+    def find_in_page(self):
+        text, ok = QInputDialog.getText(self, "Find in Page", "Text:")
+        if ok and text:
+            self.reader.findText(text)
+
+    def adjust_zoom(self, change):
+        self.reader.setZoomFactor(max(0.4, min(3.0, self.reader.zoomFactor() + change)))
+
+    def add_bookmark(self):
+        if not self.current_document:
+            self.result.setPlainText("Open a knowledge item before bookmarking it.")
+            return
+        locator = self.reader.url().toString() or self.current_document["path"]
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.execute("INSERT OR REPLACE INTO bookmarks(document_path,title,locator,created_at) VALUES(?,?,?,?)",
+                       (self.current_document["path"], self.current_document["title"], locator, time.strftime("%Y-%m-%d %H:%M:%S")))
+            db.commit()
+        self.refresh_knowledge_summary()
+        self.result.setPlainText(f"Bookmarked: {self.current_document['title']}")
+
+    def remove_bookmark(self):
+        selected = self.bookmark_list.selectedItems()
+        if not selected:
+            return
+        bookmark = selected[0].data(Qt.UserRole)
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.execute("DELETE FROM bookmarks WHERE id=?", (bookmark["id"],))
+            db.commit()
+        self.refresh_knowledge_summary()
+
+    def open_bookmark(self):
+        selected = self.bookmark_list.selectedItems()
+        if selected:
+            data = selected[0].data(Qt.UserRole)
+            self.open_document({"path": data["path"], "title": data["title"]})
+            if data.get("locator", "").startswith("http"):
+                self.reader.load(QUrl(data["locator"]))
+
+    def open_recent(self):
+        selected = self.recent_list.selectedItems()
+        if selected:
+            data = selected[0].data(Qt.UserRole)
+            self.open_document({"path": data["path"], "title": data["title"]})
 
     def load_reader(self):
         if not self.kiwix_process or self.kiwix_process.poll() is not None:
@@ -2805,6 +3159,10 @@ class OfflineKnowledgePage(QWidget):
         if command_exists("xdg-open"):
             subprocess.Popen(["xdg-open", str(zim.parent)])
             self.result.setPlainText(f"Opened folder:\n{zim.parent}")
+
+    def shutdown(self):
+        self.stop_kiwix_server()
+        self.knowledge_executor.shutdown(wait=False, cancel_futures=True)
 
 
 class CommandCodePage(QWidget):
@@ -5141,8 +5499,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         offline = self.pages.get("offline")
-        if offline and hasattr(offline, "stop_kiwix_server"):
-            offline.stop_kiwix_server()
+        if offline and hasattr(offline, "shutdown"):
+            offline.shutdown()
         tools_page = self.pages.get("tools")
         if tools_page and hasattr(tools_page, "shutdown"):
             tools_page.shutdown()
