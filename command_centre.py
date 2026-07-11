@@ -19,7 +19,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt, QProcess, QTimer, QUrl
+from PySide6.QtCore import QPointF, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -76,6 +76,8 @@ SPLASH_FILE = Path.home() / "Desktop/splash screen.png"
 INVENTORY_DIR = APP_DIR / "inventory"
 DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
 CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
+FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
+FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
 COMMAND_WIDGET_DIR = Path.home() / "Desktop/Code/Command-widget"
 
 
@@ -3174,6 +3176,7 @@ class CommandCodePage(QWidget):
         self.open_files = {}
         self.codex_process = None
         self.external_agent_process = None
+        self.fcc_server_process = None
         self.codex_last_message_path = None
         self.codex_log_buffer = ""
         self.codex_event_buffer = ""
@@ -3233,7 +3236,7 @@ class CommandCodePage(QWidget):
         ]:
             self.codex_mode.addItem(label, value)
         self.agent_provider = QComboBox()
-        for label, value in [("Codex", "codex"), ("Claude", "claude"), ("DeepSeek", "deepseek"), ("Ollama", "ollama"), ("Custom", "custom")]:
+        for label, value in [("Codex", "codex"), ("Claude", "claude"), ("FCC Claude", "fcc"), ("DeepSeek", "deepseek"), ("Ollama", "ollama"), ("Custom", "custom")]:
             self.agent_provider.addItem(label, value)
         configured_provider = self.agent_config.get("default_provider", "codex")
         self.agent_provider.setCurrentIndex(max(0, self.agent_provider.findData(configured_provider)))
@@ -3616,12 +3619,16 @@ class CommandCodePage(QWidget):
     def provider_state(self, provider):
         if provider == "codex": return "CLI detected" if self.codex_command() else "CLI missing"
         if provider == "claude": return "CLI detected" if command_exists("claude") else "CLI missing"
+        if provider == "fcc":
+            installed = command_exists("fcc-claude") and command_exists("fcc-server")
+            healthy = self.fcc_health_check() if installed else False
+            return f"{'FCC installed' if installed else 'Not installed'} · {'local proxy healthy' if healthy else 'proxy stopped'} · reviewed integration pin {FCC_AUDITED_COMMIT[:8]}"
         if provider == "ollama": return "Local runtime detected" if command_exists("ollama") else "Local runtime missing"
         config = self.agent_config.get(provider, {})
         return f"Endpoint configured · {'credential stored' if self.secret_key(provider) else 'credential missing'}" if config.get("endpoint") else "Endpoint missing"
 
     def manage_agents(self):
-        provider, ok = QInputDialog.getItem(self, "Manage Agents", "Provider:", ["Codex", "Claude", "DeepSeek", "Ollama", "Custom"], self.agent_provider.currentIndex(), False)
+        provider, ok = QInputDialog.getItem(self, "Manage Agents", "Provider:", ["Codex", "Claude", "FCC Claude", "DeepSeek", "Ollama", "Custom"], self.agent_provider.currentIndex(), False)
         if not ok: return
         key = provider.lower()
         if key == "codex":
@@ -3631,6 +3638,8 @@ class CommandCodePage(QWidget):
                 QMessageBox.information(self, "Claude", "Claude CLI was not detected. Install it using its official instructions before linking it here."); return
             ok, terminal = launch_terminal("Claude Authentication", "claude; echo; read -n 1 -s -r -p 'Press any key to close...' ")
             self.append_chat("system", f"Opened Claude CLI in {terminal}. Complete provider-owned authentication there." if ok else terminal); return
+        if key == "fcc claude":
+            self.manage_fcc(); return
         if key == "ollama":
             model, ok = QInputDialog.getText(self, "Ollama", "Default local model:", text=self.agent_config["ollama"].get("model", ""))
             if ok: self.agent_config["ollama"]["model"] = model.strip(); self.save_agent_config()
@@ -3649,6 +3658,77 @@ class CommandCodePage(QWidget):
         provider = self.agent_provider.currentData() or "codex"
         if provider == "codex": self.codex_account_status(); return
         self.append_chat("system", f"{self.agent_provider.currentText()}\n{self.provider_state(provider)}")
+
+    def fcc_health_check(self):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8082/health", timeout=0.5) as response:
+                return response.status == 200
+        except Exception:
+            return False
+
+    def manage_fcc(self):
+        installed = command_exists("fcc-server") and command_exists("fcc-claude")
+        actions = ["Start local-only proxy", "Open local Admin UI", "Check health", "Repair config permissions"] if installed else ["Review and install pinned version"]
+        action, ok = QInputDialog.getItem(self, "FCC Claude", "Action:", actions, 0, False)
+        if not ok: return
+        if action == "Review and install pinned version":
+            self.install_fcc_reviewed(); return
+        if action == "Start local-only proxy":
+            self.start_fcc_server(); return
+        if action == "Open local Admin UI":
+            if not self.fcc_health_check():
+                QMessageBox.information(self, "FCC Claude", "Start the local proxy first."); return
+            QDesktopServices.openUrl(QUrl("http://127.0.0.1:8082/admin")); return
+        if action == "Check health":
+            QMessageBox.information(self, "FCC Claude", self.provider_state("fcc")); return
+        self.repair_fcc_permissions()
+
+    def install_fcc_reviewed(self):
+        if not command_exists("uv"):
+            QMessageBox.information(self, "FCC Claude", "The reviewed installer path requires uv, which is not installed. Install uv through a trusted package source, then retry. Command Centre will not execute a curl-to-shell bootstrap.")
+            return
+        if not command_exists("npm") and not command_exists("claude"):
+            QMessageBox.information(self, "FCC Claude", "Claude Code CLI is also required. Install Node.js/npm or the official Claude Code CLI first.")
+            return
+        spec = f"free-claude-code @ git+{FCC_REPOSITORY}@{FCC_AUDITED_COMMIT}"
+        command = f"uv tool install --force {shlex.quote(spec)}"
+        message = ("Install the exact FCC revision reviewed by Command Centre?\n\n"
+                   f"Repository: {FCC_REPOSITORY}\nCommit: {FCC_AUDITED_COMMIT}\nLicense: MIT\n\nCommand:\n{command}\n\n"
+                   "FCC is a compatibility proxy, not free access to Anthropic models. Provider limits, terms, privacy policies, and charges still apply. Configuration keys are stored by FCC in ~/.fcc/.env.")
+        if not confirm(self, "Install FCC Claude", message): return
+        ok, terminal = launch_terminal("Install FCC Claude", f"{command}; status=$?; echo; echo 'FCC install exited with' $status; read -n 1 -s -r -p 'Press any key to close...'")
+        self.append_chat("system", f"Started pinned FCC installation in {terminal}." if ok else terminal)
+
+    def repair_fcc_permissions(self):
+        folder = Path.home() / ".fcc"; env_file = folder / ".env"
+        if folder.exists(): folder.chmod(0o700)
+        if env_file.exists(): env_file.chmod(0o600)
+        self.append_chat("system", f"Restricted FCC configuration permissions:\n{folder}: 0700\n{env_file}: {'0600' if env_file.exists() else 'not present'}")
+
+    def start_fcc_server(self):
+        if self.fcc_health_check():
+            self.append_chat("system", "FCC proxy is already healthy on 127.0.0.1:8082."); return
+        if self.fcc_server_process and self.fcc_server_process.state() != QProcess.NotRunning:
+            self.append_chat("system", "FCC proxy is already starting."); return
+        self.repair_fcc_permissions()
+        self.fcc_server_process = QProcess(self)
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("HOST", "127.0.0.1")
+        environment.insert("FCC_OPEN_BROWSER", "false")
+        self.fcc_server_process.setProcessEnvironment(environment)
+        self.fcc_server_process.setProgram("fcc-server")
+        self.fcc_server_process.readyReadStandardOutput.connect(self.read_fcc_output)
+        self.fcc_server_process.readyReadStandardError.connect(self.read_fcc_output)
+        self.fcc_server_process.finished.connect(lambda code, status: self.append_chat("system", f"FCC proxy stopped with exit code {code}."))
+        self.fcc_server_process.start()
+        self.append_chat("system", "Starting FCC on loopback only: 127.0.0.1:8082. Configure a non-default API token and provider in the local Admin UI.")
+
+    def read_fcc_output(self):
+        if not self.fcc_server_process: return
+        output = bytes(self.fcc_server_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        error = bytes(self.fcc_server_process.readAllStandardError()).decode("utf-8", errors="replace")
+        text = (output + error).strip()
+        if text: self.output.appendPlainText("[FCC] " + text[-4000:])
 
     def agent_provider_changed(self):
         provider = self.agent_provider.currentData() or "codex"
@@ -3960,6 +4040,13 @@ class CommandCodePage(QWidget):
         if provider == "claude":
             if not command_exists("claude"): self.append_chat("system", "Claude CLI was not found."); return
             self.run_external_agent("claude", ["-p", prompt], display_question); return
+        if provider == "fcc":
+            if not command_exists("fcc-claude"):
+                self.append_chat("system", "FCC Claude is not installed. Open Manage Agents to review the pinned installation."); return
+            if not self.fcc_health_check():
+                self.append_chat("system", "FCC local proxy is not running. Start it from Manage Agents first."); return
+            self.repair_fcc_permissions()
+            self.run_external_agent("fcc-claude", ["-p", prompt], display_question); return
         if provider == "ollama":
             if not command_exists("ollama"): self.append_chat("system", "Ollama was not found."); return
             model = self.agent_config.get("ollama", {}).get("model", "")
@@ -4147,6 +4234,9 @@ class CommandCodePage(QWidget):
 
     def shutdown(self):
         self.stop_codex()
+        if self.fcc_server_process and self.fcc_server_process.state() != QProcess.NotRunning:
+            self.fcc_server_process.terminate()
+            if not self.fcc_server_process.waitForFinished(2000): self.fcc_server_process.kill()
         self.agent_executor.shutdown(wait=False, cancel_futures=True)
 
     def eventFilter(self, watched, event):
