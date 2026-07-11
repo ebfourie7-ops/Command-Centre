@@ -370,6 +370,7 @@ class AdvancedCommandIntelPage(QWidget):
 
     def build_browser(self):
         page = QWidget(); layout = QVBoxLayout(page)
+        self.browser_page = page
         bar = QHBoxLayout()
         new = QPushButton("+"); back = QPushButton("←"); forward = QPushButton("→"); reload_button = QPushButton("↻")
         self.address = QLineEdit(); self.address.setPlaceholderText("URL")
@@ -425,7 +426,7 @@ class AdvancedCommandIntelPage(QWidget):
             QMessageBox.warning(self, "Blocked URL", "Command Intel only opens valid HTTP and HTTPS addresses.")
             return
         if self.privacy.currentText() == "External browser": QDesktopServices.openUrl(QUrl(url)); return
-        self.new_browser_tab(url); self.tabs.setCurrentIndex(1)
+        self.new_browser_tab(url); self.tabs.setCurrentWidget(self.browser_page)
 
     def close_browser_tab(self, index):
         widget = self.browser_tabs.widget(index); self.browser_tabs.removeTab(index); widget.deleteLater()
