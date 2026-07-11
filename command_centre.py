@@ -5854,7 +5854,10 @@ def main():
         """
     )
     window = MainWindow()
-    window.show()
+    primary_screen = app.primaryScreen()
+    if primary_screen:
+        window.setGeometry(primary_screen.availableGeometry())
+    window.showMaximized()
     sys.exit(app.exec())
 
 
