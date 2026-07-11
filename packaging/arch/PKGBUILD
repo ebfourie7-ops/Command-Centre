@@ -1,5 +1,5 @@
 pkgname=command-centre
-pkgver=0.2.alpha
+pkgver=0.8.0
 pkgrel=1
 pkgdesc="CommandOS operations dashboard and Command Intel investigation workspace"
 arch=('any')
@@ -12,7 +12,7 @@ sha256sums=()
 
 package() {
   install -d "$pkgdir/opt/command-centre" "$pkgdir/usr/bin" "$pkgdir/usr/share/applications"
-  cp -a "$startdir/../../command_centre.py" "$startdir/../../command_intel.py" "$startdir/../../deployments" "$pkgdir/opt/command-centre/"
+  cp -a "$startdir/../../command_centre.py" "$startdir/../../command_intel.py" "$startdir/../../deployments" "$startdir/../../tools" "$pkgdir/opt/command-centre/"
   install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/opt/command-centre/logo.png"
   printf '#!/bin/sh\nexec python /opt/command-centre/command_centre.py "$@"\n' > "$pkgdir/usr/bin/command-centre"
   chmod 755 "$pkgdir/usr/bin/command-centre"
