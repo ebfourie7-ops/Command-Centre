@@ -69,6 +69,7 @@ INTEL_CONFIG = CONFIG_DIR / "command_intel.json"
 CONTROL_QUEUE_FILE = CONFIG_DIR / "control_queue.json"
 TOOL_STATE_FILE = CONFIG_DIR / "tool_library_state.json"
 SOFTWARE_HISTORY_FILE = CONFIG_DIR / "software_history.json"
+CACHYOS_PACKAGE_CATALOG = Path("/usr/lib/cachyos-pi/pkglist.yaml")
 DEPLOYMENT_STATE_FILE = CONFIG_DIR / "deployment_state.json"
 APP_DIR = Path(__file__).resolve().parent
 LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
@@ -1285,6 +1286,15 @@ class SoftwarePage(QWidget):
         self.cachyos_pi_status = QLabel("--")
         self.cachyos_pi_status.setObjectName("controlState")
         self.cachyos_pi_status.setWordWrap(True)
+        self.cachyos_catalog = {}
+        self.cachyos_checked = set()
+        self.cachyos_category = QComboBox()
+        self.cachyos_search = QLineEdit()
+        self.cachyos_search.setPlaceholderText("Filter CachyOS popular applications")
+        self.cachyos_list = QListWidget()
+        self.cachyos_category.currentTextChanged.connect(self.render_cachyos_catalog)
+        self.cachyos_search.textChanged.connect(self.render_cachyos_catalog)
+        self.cachyos_list.itemChanged.connect(self.cachyos_item_changed)
         self.package_search = QLineEdit()
         self.package_search.setPlaceholderText("Search packages")
         self.package_search.returnPressed.connect(self.search_packages)
@@ -1434,10 +1444,16 @@ class SoftwarePage(QWidget):
         curated_body.setWordWrap(True)
         curated_layout.addWidget(curated_body)
         curated_layout.addWidget(self.cachyos_pi_status)
-        open_curated = QPushButton("OPEN CACHYOS PACKAGE INSTALLER")
-        open_curated.clicked.connect(self.open_cachyos_package_installer)
-        curated_layout.addWidget(open_curated)
+        filters = QHBoxLayout()
+        filters.addWidget(self.cachyos_category)
+        filters.addWidget(self.cachyos_search, 1)
+        curated_layout.addLayout(filters)
+        curated_layout.addWidget(self.cachyos_list)
+        install_curated = QPushButton("INSTALL CHECKED PACKAGES")
+        install_curated.clicked.connect(self.install_cachyos_packages)
+        curated_layout.addWidget(install_curated)
         layout.addWidget(curated)
+        self.load_cachyos_catalog()
 
         search_heading = QLabel("REPOSITORY PACKAGE SEARCH")
         search_heading.setObjectName("panelTitle")
@@ -1624,28 +1640,93 @@ class SoftwarePage(QWidget):
         ]:
             tools.append(f"{label}: {'available' if command_exists(tool) else 'missing'}")
         self.tools_status.setText("    ".join(tools))
-        if command_exists("cachyos-pi"):
-            self.cachyos_pi_status.setText("READY  ·  cachyos-packageinstaller is installed")
-        else:
-            self.cachyos_pi_status.setText("NOT INSTALLED  ·  Install cachyos-packageinstaller to enable the curated catalogue")
-
-    def open_cachyos_package_installer(self):
-        if not command_exists("cachyos-pi"):
-            self.result.setPlainText(
-                "CachyOS Package Installer is not installed.\n\n"
-                "Install package: cachyos-packageinstaller"
+        if self.cachyos_catalog:
+            package_count = sum(len(packages) for packages in self.cachyos_catalog.values())
+            self.cachyos_pi_status.setText(
+                f"READY  ·  {package_count} curated entries in {len(self.cachyos_catalog)} categories"
             )
-            return
+        else:
+            self.cachyos_pi_status.setText("CATALOGUE UNAVAILABLE  ·  cachyos-packageinstaller data was not found")
+
+    def load_cachyos_catalog(self):
         try:
-            subprocess.Popen(["cachyos-pi"])
-        except OSError as error:
-            self.result.setPlainText(f"Unable to open CachyOS Package Installer:\n{error}")
+            lines = CACHYOS_PACKAGE_CATALOG.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        catalog = {}
+        category = ""
+        for raw_line in lines:
+            line = raw_line.strip()
+            if line.startswith("- name:"):
+                category = line.split(":", 1)[1].strip().strip('"\'')
+                catalog.setdefault(category, [])
+            elif category and line.startswith("- "):
+                packages = line[2:].strip().split()
+                if packages and all(re.match(r"^[A-Za-z0-9@._+:-]+$", package) for package in packages):
+                    catalog[category].append(packages)
+        self.cachyos_catalog = {name: packages for name, packages in catalog.items() if packages}
+        self.cachyos_category.blockSignals(True)
+        self.cachyos_category.clear()
+        self.cachyos_category.addItem("All categories")
+        self.cachyos_category.addItems(self.cachyos_catalog.keys())
+        self.cachyos_category.blockSignals(False)
+        self.render_cachyos_catalog()
+        self.refresh_tools_status()
+
+    def render_cachyos_catalog(self):
+        if not hasattr(self, "cachyos_list"):
             return
-        self.result.setPlainText(
-            "Opened CachyOS Package Installer.\n\n"
-            "Use Popular Applications for the curated category catalogue or Repo for the full package list."
-        )
-        self.parent_window.add_history("CachyOS Package Installer opened")
+        category_filter = self.cachyos_category.currentText()
+        needle = self.cachyos_search.text().strip().lower()
+        installed_output = run_text(["pacman", "-Qq"], 8)[0] if command_exists("pacman") else ""
+        installed = set(installed_output.splitlines())
+        self.cachyos_list.blockSignals(True)
+        self.cachyos_list.clear()
+        for category, entries in self.cachyos_catalog.items():
+            if category_filter not in ("", "All categories", category):
+                continue
+            for packages in entries:
+                bundle = " ".join(packages)
+                if needle and needle not in category.lower() and needle not in bundle.lower():
+                    continue
+                state = "INSTALLED" if all(package in installed for package in packages) else "AVAILABLE"
+                item = QListWidgetItem(f"{packages[0]}  ·  {category}  ·  {state}\n{bundle}")
+                item.setData(Qt.UserRole, packages)
+                item.setCheckState(Qt.Checked if bundle in self.cachyos_checked else Qt.Unchecked)
+                self.cachyos_list.addItem(item)
+        self.cachyos_list.blockSignals(False)
+
+    def cachyos_item_changed(self, item):
+        bundle = " ".join(item.data(Qt.UserRole) or [])
+        if not bundle:
+            return
+        if item.checkState() == Qt.Checked:
+            self.cachyos_checked.add(bundle)
+        else:
+            self.cachyos_checked.discard(bundle)
+
+    def install_cachyos_packages(self):
+        packages = []
+        for bundle in sorted(self.cachyos_checked):
+            for package in bundle.split():
+                if package not in packages:
+                    packages.append(package)
+        if not packages:
+            self.result.setPlainText("Check one or more CachyOS catalogue entries first.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        if command_exists("yay"):
+            command = f"yay -S --needed {quoted}"
+        elif command_exists("paru"):
+            command = f"paru -S --needed {quoted}"
+        else:
+            command = f"sudo pacman -S --needed {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        if not confirm(self, "Install CachyOS Curated Packages", f"Install these packages?\n\n{review}\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command("Install CachyOS Curated Packages", command):
+            self.record_transaction("CachyOS curated package installation", command)
+            self.parent_window.add_history(f"CachyOS curated install started: {len(packages)} package(s)")
 
     def clean_ansi(self, text):
         return re.sub(r"\x1b\[[0-9;]*m", "", text)
