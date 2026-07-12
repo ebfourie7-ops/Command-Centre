@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Command Centre
+Comment=CommandOS operations dashboard
+Exec=/home/eugene/Desktop/Code/Command Centre/start.sh
+Path=/home/eugene/Desktop/Code/Command Centre
+Terminal=false
+Type=Application
+Categories=System;Utility;
+Icon=/home/eugene/Desktop/Code/Command Centre/ChatGPT Image Jul 9, 2026, 09_59_59 PM.png

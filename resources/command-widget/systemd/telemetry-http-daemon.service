@@ -1,0 +1,13 @@
+[Unit]
+Description=Telemetry HTTP daemon
+After=network.target
+Wants=telemetry-daemon.service
+
+[Service]
+ExecStart=%h/.local/bin/telemetry-http-daemon
+Restart=on-failure
+RestartSec=5
+Environment=PATH=%h/.local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

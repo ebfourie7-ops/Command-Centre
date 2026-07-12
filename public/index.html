@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Command Centre</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">CC</div>
+          <div>
+            <h1>Command Centre</h1>
+            <p id="hostLabel">CommandOS</p>
+          </div>
+        </div>
+
+        <nav id="moduleNav" class="module-nav" aria-label="Command Centre modules"></nav>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Operations dashboard</p>
+            <h2 id="activeTitle">System Dashboard</h2>
+          </div>
+          <div class="top-actions">
+            <button id="paletteButton" class="icon-button" title="Open command palette" aria-label="Open command palette">⌕</button>
+            <button id="refreshButton" class="icon-button" title="Refresh" aria-label="Refresh">↻</button>
+          </div>
+        </header>
+
+        <section id="dashboardView" class="view active">
+          <div class="mode-strip" id="modeStrip"></div>
+
+          <div class="metrics-grid">
+            <article class="metric primary">
+              <span>CPU</span>
+              <strong id="cpuValue">--</strong>
+              <p id="cpuMeta">--</p>
+              <div class="bar"><i id="cpuBar"></i></div>
+            </article>
+            <article class="metric">
+              <span>GPU</span>
+              <strong id="gpuValue">--</strong>
+              <p id="gpuMeta">--</p>
+              <div class="bar amber"><i id="gpuBar"></i></div>
+            </article>
+            <article class="metric">
+              <span>Memory</span>
+              <strong id="ramValue">--</strong>
+              <p id="ramMeta">--</p>
+              <div class="bar blue"><i id="ramBar"></i></div>
+            </article>
+            <article class="metric">
+              <span>Network</span>
+              <strong id="netValue">--</strong>
+              <p id="netMeta">--</p>
+              <div class="bar cyan"><i id="netBar"></i></div>
+            </article>
+          </div>
+
+          <div class="status-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>System State</h3>
+                <span id="modePill" class="pill">Unknown</span>
+              </div>
+              <dl class="state-list">
+                <div><dt>Kernel</dt><dd id="kernelValue">--</dd></div>
+                <div><dt>Uptime</dt><dd id="uptimeValue">--</dd></div>
+                <div><dt>Storage</dt><dd id="storageValue">--</dd></div>
+                <div><dt>Battery</dt><dd id="batteryValue">--</dd></div>
+                <div><dt>Failed services</dt><dd id="failedValue">--</dd></div>
+                <div><dt>Updates</dt><dd id="updatesValue">--</dd></div>
+              </dl>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Command Preview</h3>
+                <span class="pill neutral">Confirm first</span>
+              </div>
+              <div id="commandList" class="command-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="moduleView" class="view">
+          <div id="moduleContent" class="module-content"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="palette" class="palette">
+      <div class="palette-box">
+        <input id="paletteInput" type="search" placeholder="Search actions, tools, diagnostics, modes" autocomplete="off">
+        <div id="paletteResults" class="palette-results"></div>
+      </div>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>

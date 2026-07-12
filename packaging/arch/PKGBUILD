@@ -1,0 +1,22 @@
+pkgname=command-centre
+pkgver=0.8.0
+pkgrel=5
+pkgdesc="CommandOS operations dashboard and Command Intel investigation workspace"
+arch=('any')
+url="https://localhost/command-centre"
+license=('custom')
+depends=('python' 'pyside6' 'qt6-webengine')
+optdepends=('ollama: local evidence analysis' 'exiftool: metadata inspection' 'nmap: authorized network discovery')
+source=()
+sha256sums=()
+
+package() {
+  install -d "$pkgdir/opt/command-centre" "$pkgdir/usr/bin" "$pkgdir/usr/share/applications"
+  cp -a "$startdir/../../command_centre.py" "$startdir/../../command_intel.py" "$startdir/../../deployments" "$startdir/../../resources" "$startdir/../../tools" "$pkgdir/opt/command-centre/"
+  install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/opt/command-centre/logo.png"
+  install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/command-centre.png"
+  install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/usr/share/pixmaps/command-centre.png"
+  printf '#!/bin/sh\nexec python /opt/command-centre/command_centre.py "$@"\n' > "$pkgdir/usr/bin/command-centre"
+  chmod 755 "$pkgdir/usr/bin/command-centre"
+  install -Dm644 "$startdir/command-centre.desktop" "$pkgdir/usr/share/applications/command-centre.desktop"
+}
