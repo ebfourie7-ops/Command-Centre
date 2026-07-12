@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from command_centre import SystemEventStore
+from core.events import SystemEventStore
 
 
 class SystemEventStoreTests(unittest.TestCase):

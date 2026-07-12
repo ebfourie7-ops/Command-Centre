@@ -2,7 +2,6 @@
 import json
 import html
 import hashlib
-import calendar
 import os
 import re
 import signal
@@ -20,6 +19,15 @@ import urllib.parse
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from core.shell_actions import (
+    AUDIT_LOG, ActionValidationError, audited_launch, audited_shell_script,
+    parse_program_command, run_argv, validate_environment, validate_package,
+    validate_service, validate_url, validate_user_path,
+)
+from core.config_schema import ConfigValidationError, validate_agent_config, validate_deployment_profiles
+from core.events import SystemEventStore
+from core.telemetry import read_telemetry
 
 from PySide6.QtCore import QFileSystemWatcher, QPointF, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
@@ -61,9 +69,7 @@ from PySide6.QtWidgets import (
 from command_intel import AdvancedCommandIntelPage
 
 
-STATE_FILE = Path.home() / ".local/state/telemetry/telemetry.json"
 APP_VERSION = "0.9.0"
-TELEMETRY_URL = "http://127.0.0.1:9090/telemetry"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
@@ -178,98 +184,6 @@ def harden_private_storage():
                 if path.is_symlink(): continue
                 path.chmod(0o700 if path.is_dir() else 0o600)
             except OSError: pass
-
-
-class SystemEventStore:
-    """Persistent, structured event timeline shared by Command Centre surfaces."""
-
-    def __init__(self, path=SYSTEM_EVENTS_DB):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.parent.chmod(0o700)
-        self.db = sqlite3.connect(path, check_same_thread=False)
-        path.chmod(0o600)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("""
-            CREATE TABLE IF NOT EXISTS system_events (
-                id INTEGER PRIMARY KEY,
-                created_utc TEXT NOT NULL,
-                category TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                source_app TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                title TEXT NOT NULL,
-                detail TEXT DEFAULT '',
-                evidence_json TEXT DEFAULT '{}',
-                action_id TEXT DEFAULT '',
-                dedupe_key TEXT DEFAULT ''
-            )
-        """)
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_system_events_created ON system_events(created_utc DESC)")
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)")
-        self.db.execute("""
-            CREATE TABLE IF NOT EXISTS observed_state (
-                state_key TEXT PRIMARY KEY,
-                state_value TEXT NOT NULL,
-                updated_utc TEXT NOT NULL
-            )
-        """)
-        # Remove early implementation noise; these were startup messages rather
-        # than meaningful state transitions.
-        self.db.execute(
-            "DELETE FROM system_events WHERE title IN ('Dashboard monitoring started', 'Telemetry connected')"
-        )
-        self.db.commit()
-
-    def add(self, category, title, severity="INFO", event_type="state", detail="", evidence=None, action_id="", dedupe_key="", dedupe_seconds=300):
-        now_epoch = int(time.time())
-        created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_epoch))
-        if dedupe_key:
-            recent = self.db.execute(
-                "SELECT created_utc FROM system_events WHERE dedupe_key=? ORDER BY id DESC LIMIT 1",
-                (dedupe_key,),
-            ).fetchone()
-            if recent:
-                try:
-                    previous = calendar.timegm(time.strptime(recent["created_utc"], "%Y-%m-%dT%H:%M:%SZ"))
-                    if now_epoch - previous < dedupe_seconds:
-                        return False
-                except ValueError:
-                    pass
-        self.db.execute(
-            "INSERT INTO system_events(created_utc,category,severity,source_app,event_type,title,detail,evidence_json,action_id,dedupe_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (created, category.upper(), severity.upper(), "Command Centre", event_type, title, detail, json.dumps(evidence or {}), action_id, dedupe_key),
-        )
-        self.db.commit()
-        return True
-
-    def recent(self, limit=100, category="ALL"):
-        if category == "ALL":
-            return self.db.execute("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return self.db.execute("SELECT * FROM system_events WHERE category=? ORDER BY id DESC LIMIT ?", (category, limit)).fetchall()
-
-    def observed_states(self):
-        return {row["state_key"]: row["state_value"] for row in self.db.execute("SELECT state_key,state_value FROM observed_state")}
-
-    def save_observed_states(self, states):
-        updated = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.db.executemany(
-            "INSERT INTO observed_state(state_key,state_value,updated_utc) VALUES(?,?,?) "
-            "ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value,updated_utc=excluded.updated_utc",
-            [(key, json.dumps(value, sort_keys=True), updated) for key, value in states.items()],
-        )
-        self.db.commit()
-
-    @staticmethod
-    def decode_observed_states(states):
-        decoded = {}
-        for key, value in states.items():
-            try: decoded[key] = json.loads(value)
-            except (TypeError, ValueError): decoded[key] = value
-        return decoded
-
-    def close(self):
-        self.db.close()
 
 
 MODULES = [
@@ -455,29 +369,10 @@ TOOL_GROUPS = [
 
 def run_text(command, timeout=2):
     try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = run_argv(command, action="read-only probe", timeout=timeout)
         return result.stdout.strip(), result.stderr.strip(), result.returncode
     except (FileNotFoundError, subprocess.TimeoutExpired) as error:
         return "", str(error), 127
-
-
-def read_telemetry():
-    try:
-        with urllib.request.urlopen(TELEMETRY_URL, timeout=0.8) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception:
-        pass
-
-    try:
-        return json.loads(STATE_FILE.read_text())
-    except Exception:
-        return {}
 
 
 def command_exists(command):
@@ -558,6 +453,10 @@ def free_local_port():
 
 
 def launch_terminal(title, command):
+    try:
+        audited_shell_script(command, action=f"terminal: {title}", trusted=True)
+    except ActionValidationError as error:
+        return False, str(error)
     terminal_commands = [
         ["konsole", "--new-tab", "--hold", "-p", f"tabtitle={title}", "-e", "bash", "-lc", command],
         ["alacritty", "-t", title, "-e", "bash", "-lc", command],
@@ -1665,8 +1564,10 @@ class ControlPage(QWidget):
         if not service:
             self.set_result("Select a service first.")
             return
-        if not re.match(r"^[A-Za-z0-9_.@:\\-]+\.service$", service):
-            self.set_result("Blocked invalid service name.")
+        try:
+            service = validate_service(service)
+        except ActionValidationError as error:
+            self.set_result(f"Blocked invalid service name: {error}")
             return
 
         if action == "logs":
@@ -2194,6 +2095,11 @@ class SoftwarePage(QWidget):
         self.cachyos_list.blockSignals(False)
 
     def install_curated_bundle(self, packages):
+        try:
+            packages = [validate_package(package) for package in packages]
+        except ActionValidationError as error:
+            self.result.setPlainText(f"Blocked invalid curated package: {error}")
+            return
         missing = []
         installed_output = run_text(["pacman", "-Qq"], 8)[0] if command_exists("pacman") else ""
         installed = set(installed_output.splitlines())
@@ -2235,6 +2141,11 @@ class SoftwarePage(QWidget):
                     packages.append(package)
         if not packages:
             self.result.setPlainText("Check one or more CommandOS catalogue entries first.")
+            return
+        try:
+            packages = [validate_package(package) for package in packages]
+        except ActionValidationError as error:
+            self.result.setPlainText(f"Blocked invalid curated package: {error}")
             return
         quoted = " ".join(shlex.quote(package) for package in packages)
         if command_exists("yay"):
@@ -2320,6 +2231,11 @@ class SoftwarePage(QWidget):
         if not package:
             self.result.setPlainText("Select an available kernel first.")
             return
+        try:
+            package = validate_package(package)
+        except ActionValidationError as error:
+            self.result.setPlainText(str(error))
+            return
         command = f"sudo chwd-kernel --install {shlex.quote(package)}"
         if not confirm(self, "Install Kernel", f"Install this kernel?\n\n{package}\n\nCommand:\n{command}"):
             return
@@ -2331,6 +2247,11 @@ class SoftwarePage(QWidget):
         package = self.selected_installed_kernel()
         if not package:
             self.result.setPlainText("Select an installed kernel first.")
+            return
+        try:
+            package = validate_package(package)
+        except ActionValidationError as error:
+            self.result.setPlainText(str(error))
             return
         if self.installed_kernels.count() <= 1:
             self.result.setPlainText("Refusing to remove the only detected installed kernel. Install and verify a fallback kernel first.")
@@ -2505,6 +2426,7 @@ class SoftwarePage(QWidget):
         return package if re.match(r"^[A-Za-z0-9@._+:-]+$", package) else ""
 
     def package_install_command(self, package):
+        package = validate_package(package)
         if command_exists("yay"):
             return f"yay -S {shlex.quote(package)}"
         if command_exists("paru"):
@@ -3106,10 +3028,13 @@ class ToolLibraryPage(QWidget):
         if not command:
             self.result.setPlainText(f"No launch command was detected for {tool['name']}.")
             return
-        if tool["kind"] == "flatpak":
-            subprocess.Popen(["bash", "-lc", command])
-        elif command_exists(shlex.split(command)[0]):
-            subprocess.Popen(shlex.split(command))
+        try:
+            arguments = parse_program_command(command)
+        except ActionValidationError as error:
+            self.result.setPlainText(f"Blocked unsafe launch command: {error}")
+            return
+        if command_exists(arguments[0]):
+            audited_launch(arguments, action=f"launch tool: {tool['name']}")
         else:
             self.result.setPlainText(f"{command} is not available.")
             return
@@ -3122,6 +3047,12 @@ class ToolLibraryPage(QWidget):
         if not tool:
             return
         command = tool["command"] or tool["package"]
+        try:
+            arguments = parse_program_command(command)
+            command = shlex.join(arguments)
+        except ActionValidationError as error:
+            self.result.setPlainText(f"Blocked unsafe terminal command: {error}")
+            return
         shell_command = (
             f"{command}; "
             "status=$?; echo; "
@@ -4631,7 +4562,7 @@ class CommandCodePage(QWidget):
         defaults = {"default_provider": "codex", "deepseek": {"endpoint": "https://api.deepseek.com/chat/completions", "model": "deepseek-chat"},
                     "custom": {"endpoint": "", "model": ""}, "ollama": {"model": ""}}
         try:
-            data = json.loads(AGENT_CONFIG_FILE.read_text(encoding="utf-8"))
+            data = validate_agent_config(json.loads(AGENT_CONFIG_FILE.read_text(encoding="utf-8")))
             for key, value in data.items(): defaults[key] = value
         except Exception:
             pass
@@ -6167,8 +6098,8 @@ class DeploymentPage(QWidget):
     def load_json_file(self, path):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-        except Exception:
+            return validate_deployment_profiles(data, trusted_shell=path.resolve() == DEFAULT_DEPLOYMENTS_FILE.resolve())
+        except (OSError, ValueError, ConfigValidationError):
             return []
 
     def custom_profiles(self):
@@ -6516,9 +6447,19 @@ class DeploymentPage(QWidget):
         launched = []
         missing = []
         env = os.environ.copy()
-        env.update({str(k): str(v) for k, v in profile.get("environment", {}).items()})
+        try:
+            env.update(validate_environment(profile.get("environment", {})))
+        except ActionValidationError as error:
+            self.result.setPlainText(f"Blocked invalid deployment environment: {error}")
+            return
+        trusted_profile = Path(profile.get("source", "")).resolve() == DEFAULT_DEPLOYMENTS_FILE.resolve()
 
         for service in profile.get("services", []):
+            try:
+                service = validate_service(service)
+            except ActionValidationError as error:
+                missing.append(str(error))
+                continue
             self.launch_terminal_command(f"Start {service}", f"systemctl --user start {shlex.quote(service)} || sudo systemctl start {shlex.quote(service)}")
             launched.append(f"service: {service}")
 
@@ -6527,13 +6468,24 @@ class DeploymentPage(QWidget):
             launched.append(f"folder: {folder}")
 
         for url in profile.get("urls", []):
+            try:
+                url = validate_url(url)
+            except ActionValidationError as error:
+                missing.append(str(error))
+                continue
             if command_exists("xdg-open"):
-                subprocess.Popen(["xdg-open", url], env=env)
+                audited_launch(["xdg-open", url], action="open deployment URL", env=env)
                 launched.append(f"url: {url}")
 
         for terminal in profile.get("terminals", []):
-            cwd = Path(os.path.expanduser(terminal.get("cwd", "~")))
-            command = terminal.get("command", "exec bash")
+            try:
+                cwd = validate_user_path(terminal.get("cwd", "~"))
+                command = terminal.get("command", "exec bash")
+                if not trusted_profile:
+                    command = shlex.join(parse_program_command(command))
+            except ActionValidationError as error:
+                missing.append(str(error))
+                continue
             launch_terminal(terminal.get("title", profile.get("name", "Deployment")), f"cd {shlex.quote(str(cwd))}; {command}")
             launched.append(f"terminal: {terminal.get('title', 'Terminal')}")
 
@@ -6541,10 +6493,15 @@ class DeploymentPage(QWidget):
             command = app.get("command", "")
             if not command:
                 continue
-            if self.component_status(command) == "missing":
+            try:
+                arguments = parse_program_command(command)
+            except ActionValidationError as error:
+                missing.append(f"{app.get('name', command)} ({error})")
+                continue
+            if self.component_status(arguments[0]) == "missing":
                 missing.append(f"{app.get('name', command)} ({command})")
                 continue
-            subprocess.Popen(["bash", "-lc", command], env=env)
+            audited_launch(arguments, action=f"launch deployment app: {app.get('name', arguments[0])}", env=env)
             launched.append(f"app: {app.get('name', command)}")
 
         self.result.setPlainText(
@@ -6554,10 +6511,14 @@ class DeploymentPage(QWidget):
         self.parent_window.add_history(f"Deployment launched: {profile.get('name')}")
 
     def open_path(self, folder):
-        path = Path(os.path.expanduser(folder))
+        try:
+            path = validate_user_path(folder)
+        except ActionValidationError as error:
+            self.result.setPlainText(f"Blocked deployment folder: {error}")
+            return
         path.mkdir(parents=True, exist_ok=True)
         if command_exists("xdg-open"):
-            subprocess.Popen(["xdg-open", str(path)])
+            audited_launch(["xdg-open", str(path)], action="open deployment folder")
 
     def launch_terminal_command(self, title, command):
         shell_command = (
@@ -6578,6 +6539,13 @@ class DeploymentPage(QWidget):
         command = action.get("command", "")
         if not command:
             return
+        trusted_profile = Path(profile.get("source", "")).resolve() == DEFAULT_DEPLOYMENTS_FILE.resolve()
+        if not trusted_profile:
+            try:
+                command = shlex.join(parse_program_command(command))
+            except ActionValidationError as error:
+                self.result.setPlainText(f"Blocked custom quick action: {error}")
+                return
         if profile.get("warning"):
             message = f"Run quick action?\n\n{action.get('name')}\n\n{command}\n\nWARNING:\n{profile.get('warning')}"
         else:
@@ -6743,7 +6711,7 @@ class CommandAppsPage(QWidget):
         description = QLabel("Direct branch installation is disabled for security. Install reviewed Command Centre packages through the system package manager.")
         description.setWordWrap(True)
         description.setObjectName("muted")
-        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: main\n• System authorization required")
+        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: Command-Centre.v1\n• System authorization required")
         details.setObjectName("muted")
         details.setWordWrap(True)
         actions = QHBoxLayout()

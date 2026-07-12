@@ -62,13 +62,18 @@ Command Intel stores its case database and copied evidence under:
 
 Crash reports are written to `~/.local/state/command-centre/crash.log`. Arch packaging files are under `packaging/arch/`.
 
+Privileged and system command activity is recorded in a private rotating JSONL
+audit log at `~/.local/state/command-centre/actions.jsonl`. Developer-facing
+module boundaries and security rules are documented in `ARCHITECTURE.md` and
+`CONTRIBUTING.md`.
+
 The Command Widget installer payload is bundled under `resources/command-widget/`, so installing or updating the widget does not require a separate Command-widget checkout or an internet connection.
 
 Run the automated checks with:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile command_centre.py command_intel.py
+python -m py_compile command_centre.py command_intel.py core/*.py
 ```
 
 ## Notes
