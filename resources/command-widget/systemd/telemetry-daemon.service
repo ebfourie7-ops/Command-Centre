@@ -1,0 +1,12 @@
+[Unit]
+Description=Telemetry daemon
+After=network.target
+
+[Service]
+ExecStart=%h/.local/bin/telemetry-daemon
+Restart=always
+RestartSec=5
+Environment=PATH=%h/.local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

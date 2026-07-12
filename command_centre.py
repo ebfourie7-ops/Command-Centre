@@ -63,6 +63,7 @@ CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
 CODEX_USAGE_CONFIG = CONFIG_DIR / "codex_usage.json"
+CHAT_LOG_DIR = CONFIG_DIR / "chat-logs"
 AGENT_CONFIG_FILE = CONFIG_DIR / "agent_hub.json"
 USER_DEPLOYMENTS_CONFIG = CONFIG_DIR / "deployment_profiles.json"
 INTEL_CONFIG = CONFIG_DIR / "command_intel.json"
@@ -81,7 +82,7 @@ DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
 CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
 FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
 FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
-COMMAND_WIDGET_DIR = Path.home() / "Desktop/Code/Command-widget"
+COMMAND_WIDGET_DIR = APP_DIR / "resources/command-widget"
 
 
 MODULES = [
@@ -3379,6 +3380,8 @@ class CommandCodePage(QWidget):
         self.agent_future = None
         self.codex_usage = {"used": 0, "limit": 0, "last_run": 0}
         self.load_codex_usage()
+        self.chat_session_path = None
+        self.start_chat_session()
 
         self.model = QFileSystemModel()
         self.model.setRootPath(str(self.workspace))
@@ -3486,6 +3489,7 @@ class CommandCodePage(QWidget):
             ("Save", self.save_current_file),
             ("Save All", self.save_all_files),
             ("New File", self.new_file),
+            ("Preview HTML", self.preview_html),
             ("Terminal", self.open_terminal),
         ]:
             button = QPushButton(label)
@@ -3534,6 +3538,7 @@ class CommandCodePage(QWidget):
 
         tabs = QTabWidget()
         tabs.addTab(self.codex_chat_tab(), "Chat")
+        tabs.addTab(self.chat_history_tab(), "History")
         tabs.addTab(self.codex_usage_tab(), "Usage")
         layout.addWidget(tabs)
         self.update_codex_usage_display()
@@ -3556,6 +3561,18 @@ class CommandCodePage(QWidget):
         top.addWidget(self.codex_status, 2, 0, 1, 4)
         layout.addLayout(top)
 
+        auth = QHBoxLayout()
+        for label, handler in [
+            ("Account Status", self.provider_status),
+            ("Log In", self.login_selected_agent),
+            ("Log Out", self.logout_selected_agent),
+            ("Manage Provider", self.manage_agents),
+        ]:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            auth.addWidget(button)
+        layout.addLayout(auth)
+
         layout.addWidget(self.codex_output)
 
         prompt_frame = QFrame()
@@ -3573,8 +3590,6 @@ class CommandCodePage(QWidget):
         attach.clicked.connect(self.attach_files)
         row.addWidget(attach)
         for label, handler in [
-            ("Provider Status", self.provider_status),
-            ("Manage", self.manage_agents),
             ("Explain File", self.explain_current_file),
             ("Review", self.review_workspace),
             ("Stop", self.stop_codex),
@@ -3590,6 +3605,171 @@ class CommandCodePage(QWidget):
         prompt_layout.addLayout(row)
         layout.addWidget(prompt_frame)
         return tab
+
+    def chat_history_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        note = QLabel("Chat sessions are stored locally. Recent history is supplied to agents so conversations can continue across restarts.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.chat_log_list = QListWidget()
+        self.chat_log_list.currentItemChanged.connect(self.show_selected_chat_log)
+        layout.addWidget(self.chat_log_list, 1)
+
+        self.chat_log_viewer = QPlainTextEdit()
+        self.chat_log_viewer.setReadOnly(True)
+        self.chat_log_viewer.setObjectName("textPanel")
+        layout.addWidget(self.chat_log_viewer, 2)
+
+        actions = QHBoxLayout()
+        for label, handler in [
+            ("New Chat", self.new_chat_session),
+            ("Refresh", self.refresh_chat_logs),
+            ("Delete Selected", self.delete_selected_chat_log),
+            ("Delete All", self.delete_all_chat_logs),
+            ("Open Log Folder", self.open_chat_log_folder),
+        ]:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            actions.addWidget(button)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self.refresh_chat_logs()
+        return tab
+
+    def start_chat_session(self):
+        CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        self.chat_session_path = CHAT_LOG_DIR / f"chat-{stamp}-{os.getpid()}.jsonl"
+
+    def log_chat_message(self, role, message):
+        if not self.chat_session_path:
+            self.start_chat_session()
+        record = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "role": role,
+            "provider": self.agent_provider.currentText() if hasattr(self, "agent_provider") else "Command Terminal",
+            "message": message,
+        }
+        try:
+            with self.chat_session_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as error:
+            self.status.setText(f"Unable to save chat log: {error}")
+
+    def chat_log_files(self):
+        CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        return sorted(CHAT_LOG_DIR.glob("chat-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def refresh_chat_logs(self):
+        if not hasattr(self, "chat_log_list"):
+            return
+        selected = self.chat_log_list.currentItem().data(Qt.UserRole) if self.chat_log_list.currentItem() else ""
+        self.chat_log_list.clear()
+        for path in self.chat_log_files():
+            item = QListWidgetItem(path.stem.replace("chat-", "Chat ", 1))
+            item.setData(Qt.UserRole, str(path))
+            if path == self.chat_session_path:
+                item.setText(item.text() + " · current")
+            self.chat_log_list.addItem(item)
+            if str(path) == selected:
+                self.chat_log_list.setCurrentItem(item)
+
+    def formatted_chat_log(self, path):
+        messages = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                messages.append(f"[{record.get('timestamp', '')}] {record.get('role', 'unknown').upper()} · {record.get('provider', '')}\n{record.get('message', '')}")
+        except OSError as error:
+            return f"Unable to read log: {error}"
+        return "\n\n".join(messages)
+
+    def chat_history_context(self, max_characters=24000):
+        records = []
+        for path in reversed(self.chat_log_files()[:10]):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("role") in ("user", "assistant"):
+                    records.append(record)
+        excerpts = []
+        used = 0
+        for record in reversed(records[-80:]):
+            entry = f"{record.get('role', 'unknown').upper()}: {record.get('message', '')}"
+            if used + len(entry) > max_characters:
+                break
+            excerpts.append(entry)
+            used += len(entry)
+        excerpts.reverse()
+        if not excerpts:
+            return ""
+        return (
+            f"Prior Command Terminal chat history is stored as JSONL files in {CHAT_LOG_DIR}. "
+            "Use the following recent history when it is relevant to the current request:\n\n"
+            + "\n\n".join(excerpts)
+            + "\n\n--- End prior chat history ---\n\n"
+        )
+
+    def show_selected_chat_log(self, current, previous=None):
+        if not current:
+            self.chat_log_viewer.clear()
+            return
+        self.chat_log_viewer.setPlainText(self.formatted_chat_log(Path(current.data(Qt.UserRole))))
+
+    def new_chat_session(self):
+        self.start_chat_session()
+        self.codex_output.clear()
+        self.append_chat("system", "New chat session started. Prior sessions remain available in History.")
+        self.refresh_chat_logs()
+
+    def delete_selected_chat_log(self):
+        item = self.chat_log_list.currentItem()
+        if not item:
+            return
+        path = Path(item.data(Qt.UserRole))
+        if not confirm(self, "Delete Chat Log", f"Permanently delete this local chat log?\n\n{path.name}"):
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            QMessageBox.warning(self, "Delete Chat Log", str(error))
+            return
+        if path == self.chat_session_path:
+            self.start_chat_session()
+        self.chat_log_viewer.clear()
+        self.refresh_chat_logs()
+
+    def delete_all_chat_logs(self):
+        files = self.chat_log_files()
+        if not files or not confirm(self, "Delete All Chat Logs", f"Permanently delete all {len(files)} local chat logs?"):
+            return
+        errors = []
+        for path in files:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                errors.append(f"{path.name}: {error}")
+        self.start_chat_session()
+        self.codex_output.clear()
+        self.refresh_chat_logs()
+        if errors:
+            QMessageBox.warning(self, "Delete Chat Logs", "\n".join(errors))
+
+    def open_chat_log_folder(self):
+        CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CHAT_LOG_DIR)))
 
     def codex_usage_tab(self):
         tab = QWidget()
@@ -3686,6 +3866,38 @@ class CommandCodePage(QWidget):
         self.tabs.addTab(editor, "Untitled")
         self.tabs.setCurrentWidget(editor)
         self.status.setText("Untitled")
+
+    def preview_html(self):
+        editor = self.current_editor()
+        path = None
+        if editor:
+            path_text = editor.property("path") or ""
+            candidate = Path(path_text) if path_text else None
+            if candidate and candidate.suffix.lower() in (".html", ".htm"):
+                if editor.property("modified"):
+                    self.save_editor(editor)
+                    path_text = editor.property("path") or ""
+                    candidate = Path(path_text) if path_text else None
+                path = candidate
+
+        if path is None:
+            candidates = [self.workspace / "public/index.html", self.workspace / "index.html"]
+            path = next((candidate for candidate in candidates if candidate.is_file()), None)
+
+        if path is None or not path.is_file():
+            QMessageBox.information(
+                self,
+                "Preview HTML",
+                "Open an HTML file first, or add public/index.html or index.html to the workspace.",
+            )
+            return
+
+        preview = QWebEngineView()
+        preview.setUrl(QUrl.fromLocalFile(str(path.resolve())))
+        self.tabs.addTab(preview, f"Preview: {path.name}")
+        self.tabs.setCurrentWidget(preview)
+        self.status.setText(f"Local preview: {path}")
+        self.parent_window.add_history(f"Command Terminal previewed {path.name}")
 
     def current_editor(self):
         widget = self.tabs.currentWidget()
@@ -3807,6 +4019,17 @@ class CommandCodePage(QWidget):
         except Exception:
             return False
 
+    def clear_secret_key(self, provider):
+        if not command_exists("secret-tool"):
+            return False
+        result = subprocess.run(
+            ["secret-tool", "clear", "application", "command-centre", "provider", provider],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
     def provider_state(self, provider):
         if provider == "codex": return "CLI detected" if self.codex_command() else "CLI missing"
         if provider == "claude": return "CLI detected" if command_exists("claude") else "CLI missing"
@@ -3848,7 +4071,90 @@ class CommandCodePage(QWidget):
     def provider_status(self):
         provider = self.agent_provider.currentData() or "codex"
         if provider == "codex": self.codex_account_status(); return
+        if provider == "claude" and command_exists("claude"):
+            out, err, code = run_text(["claude", "auth", "status"], 10)
+            self.append_chat("system", "Claude account status\n" + (out or err or f"Status exited with {code}")); return
         self.append_chat("system", f"{self.agent_provider.currentText()}\n{self.provider_state(provider)}")
+
+    def login_selected_agent(self):
+        provider = self.agent_provider.currentData() or "codex"
+        label = self.agent_provider.currentText()
+        if provider == "codex":
+            self.link_chatgpt_account()
+            return
+        if provider == "claude":
+            if not command_exists("claude"):
+                QMessageBox.information(self, "Claude Login", "Claude CLI is not installed.")
+                return
+            if not confirm(self, "Claude Login", "Open the official Claude CLI login flow?"):
+                return
+            ok, terminal = launch_terminal("Claude Login", "claude auth login; status=$?; echo; echo 'Claude login exited with' $status; read -n 1 -s -r -p 'Press any key to close...'")
+            self.append_chat("system", f"Started Claude login in {terminal}." if ok else terminal)
+            return
+        if provider == "fcc":
+            QMessageBox.information(
+                self,
+                "FCC Claude Login",
+                "FCC Claude uses the providers configured through its local proxy. Use Manage to start FCC and configure its provider credentials; use Claude Login if the selected backend is Claude.",
+            )
+            self.manage_fcc()
+            return
+        if provider == "ollama":
+            if not command_exists("ollama"):
+                QMessageBox.information(self, "Ollama Login", "Ollama is not installed.")
+                return
+            if not confirm(self, "Ollama Login", "Open the Ollama account sign-in flow?"):
+                return
+            ok, terminal = launch_terminal("Ollama Login", "ollama signin; status=$?; echo; echo 'Ollama sign-in exited with' $status; read -n 1 -s -r -p 'Press any key to close...'")
+            self.append_chat("system", f"Started Ollama sign-in in {terminal}." if ok else terminal)
+            return
+
+        config = self.agent_config.get(provider, {})
+        endpoint, ok = QInputDialog.getText(self, f"{label} Login", "API endpoint:", text=config.get("endpoint", ""))
+        if not ok:
+            return
+        model, ok = QInputDialog.getText(self, f"{label} Login", "Model ID:", text=config.get("model", ""))
+        if not ok:
+            return
+        secret, ok = QInputDialog.getText(self, f"{label} Login", "API key (stored in the system keyring):", QLineEdit.Password)
+        if not ok or not secret.strip():
+            return
+        if self.store_secret_key(provider, secret.strip()):
+            self.agent_config[provider] = {"endpoint": endpoint.strip(), "model": model.strip()}
+            self.save_agent_config()
+            self.append_chat("system", f"{label} login saved securely in the system keyring.")
+
+    def logout_selected_agent(self):
+        provider = self.agent_provider.currentData() or "codex"
+        label = self.agent_provider.currentText()
+        if provider == "codex":
+            self.unlink_chatgpt_account()
+            return
+        if not confirm(self, f"Log Out of {label}", f"Remove the local authentication for {label} on this computer?"):
+            return
+        if provider == "claude":
+            if not command_exists("claude"):
+                QMessageBox.information(self, "Claude Logout", "Claude CLI is not installed.")
+                return
+            out, err, code = run_text(["claude", "auth", "logout"], 20)
+        elif provider == "ollama":
+            if not command_exists("ollama"):
+                QMessageBox.information(self, "Ollama Logout", "Ollama is not installed.")
+                return
+            out, err, code = run_text(["ollama", "signout"], 20)
+        elif provider == "fcc":
+            if self.fcc_server_process and self.fcc_server_process.state() != QProcess.NotRunning:
+                self.fcc_server_process.terminate()
+            self.append_chat("system", "FCC local proxy stopped. Provider credentials managed by FCC were left intact; remove them through FCC Manage to avoid deleting unrelated provider access.")
+            return
+        else:
+            removed = self.clear_secret_key(provider)
+            self.append_chat("system", f"{label} API credential removed from the system keyring." if removed else f"No stored {label} credential was found.")
+            return
+        if code == 0:
+            self.append_chat("system", f"Logged out of {label}.\n" + (out or "Local authentication removed."))
+        else:
+            QMessageBox.warning(self, f"{label} Logout", err or out or f"Logout exited with code {code}")
 
     def fcc_health_check(self):
         try:
@@ -4143,7 +4449,8 @@ class CommandCodePage(QWidget):
         instructions = {
             "agent": (
                 "You are in Agent mode inside Command Terminal. Work like the VS Code Codex agent: "
-                "inspect the workspace, make code edits when needed, run focused verification, and summarize the result."
+                "inspect the workspace, make code edits when needed, run focused verification, and summarize the result. "
+                "For local HTML, do not launch a GUI browser or local server; tell the user to use Command Terminal's Preview HTML button."
             ),
             "ask": (
                 "You are in Ask mode inside Command Terminal. Answer and explain using workspace context, "
@@ -4154,7 +4461,8 @@ class CommandCodePage(QWidget):
             ),
             "edit": (
                 "You are in Edit mode inside Command Terminal. Focus on implementing the requested change in the workspace. "
-                "Keep edits scoped, preserve existing style, and run reasonable checks."
+                "Keep edits scoped, preserve existing style, and run reasonable checks. For local HTML, do not launch a GUI browser "
+                "or local server; tell the user to use Command Terminal's Preview HTML button."
             ),
             "review": (
                 "You are in Review mode inside Command Terminal. Use a code-review stance: findings first, ordered by severity, "
@@ -4201,6 +4509,9 @@ class CommandCodePage(QWidget):
             """
         )
         self.codex_output.verticalScrollBar().setValue(self.codex_output.verticalScrollBar().maximum())
+        self.log_chat_message(role, message)
+        if hasattr(self, "chat_log_list"):
+            self.refresh_chat_logs()
 
     def ask_codex(self):
         prompt = self.codex_prompt.toPlainText().strip()
@@ -4225,6 +4536,7 @@ class CommandCodePage(QWidget):
         self.run_agent(self.mode_prompt("Review this workspace for likely bugs, missing tests, and risky implementation choices."), question)
 
     def run_agent(self, prompt, display_question=None):
+        prompt = self.chat_history_context() + prompt
         provider = self.agent_provider.currentData() or "codex"
         if provider == "codex":
             self.run_codex(prompt, display_question); return
@@ -5312,7 +5624,7 @@ class CommandAppsPage(QWidget):
         features.setObjectName("muted")
         features.setWordWrap(True)
         actions = QHBoxLayout()
-        open_project = QPushButton("Open Project")
+        open_project = QPushButton("Open Installer Files")
         open_project.clicked.connect(self.open_widget_project)
         actions.addWidget(self.widget_install)
         actions.addWidget(open_project)
@@ -5357,10 +5669,10 @@ class CommandAppsPage(QWidget):
             self.widget_status.setText("● INSTALLED · Command Centre telemetry integration active")
             self.widget_install.setText("Reinstall / Update")
         elif source_ready:
-            self.widget_status.setText("○ AVAILABLE · Local verified project found")
+            self.widget_status.setText("○ AVAILABLE · Installer included with Command Centre")
             self.widget_install.setText("Install")
         else:
-            self.widget_status.setText("SOURCE NOT FOUND · Expected ~/Desktop/Code/Command-widget")
+            self.widget_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
             self.widget_install.setText("Install unavailable")
         self.widget_install.setEnabled(source_ready)
 
@@ -5374,7 +5686,7 @@ class CommandAppsPage(QWidget):
         if not confirm(
             self,
             f"{action.title()} Command Widget",
-            f"Run the trusted local installer?\n\n/bin/bash {installer}\n\nThis copies files into your user profile and enables the two telemetry user services.",
+            f"Run the installer included with Command Centre?\n\n/bin/bash {installer}\n\nThis copies files into your user profile and enables the two telemetry user services.",
         ):
             return
         self.widget_install.setEnabled(False)
@@ -5401,7 +5713,7 @@ class CommandAppsPage(QWidget):
         if COMMAND_WIDGET_DIR.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(COMMAND_WIDGET_DIR)))
         else:
-            QMessageBox.information(self, "Command Widget", f"Project folder not found:\n{COMMAND_WIDGET_DIR}")
+            QMessageBox.information(self, "Command Widget", f"Bundled installer folder not found:\n{COMMAND_WIDGET_DIR}")
 
 
 class CommandIntelPage(QWidget):

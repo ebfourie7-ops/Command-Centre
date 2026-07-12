@@ -1,0 +1,22 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Name": "Telemetry Widget",
+    "Description": "Shows simple CPU and memory telemetry",
+    "Icon": "utilities-system-monitor",
+    "Id": "telemetrywidget",
+    "Version": "1.0",
+    "License": "MIT",
+    "Category": "Utilities",
+    "Authors": [
+      {
+        "Name": "OpenAI",
+        "Email": ""
+      }
+    ]
+  },
+  "X-Plasma-API": "declarativeappletscript",
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "X-Plasma-MainScript": "ui/main.qml",
+  "X-KDE-ServiceTypes": "Plasma/Applet"
+}

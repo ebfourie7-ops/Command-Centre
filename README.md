@@ -19,12 +19,14 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 - Confirm-first controls for changing actions
 - Command palette with `Ctrl+K`
 - Main tabs for System Dashboard, System Control, Tool Library, Command Terminal, Offline Knowledge, Deployment Centre, and Software Centre
-- Command Apps catalogue with descriptions, installation-state detection, confirm-first installers, a working local Command Widget installer/update action, and a CommandOS Installer placeholder
+- Command Apps catalogue with descriptions, installation-state detection, confirm-first installers, a bundled offline Command Widget installer/update action, and a CommandOS Installer placeholder
 - Software Centre includes update checks, package search, confirm-first install/remove actions, Flatpak updates, package list export, and maintenance command previews
 - Software Centre includes a Kernel Manager for listing, installing, and removing kernels through `chwd-kernel`, plus initramfs and GRUB rebuild actions
 - Tool Library auto-refreshes from live pacman, Flatpak, desktop launcher, and executable scans, with launch, terminal, install, and guide actions
-- Command Terminal provides a VS Code-style workspace with explorer, editor tabs, save/save-all, and terminal/output
+- Command Terminal provides a VS Code-style workspace with explorer, editor tabs, save/save-all, terminal/output, and an in-app local HTML preview
 - Command Terminal includes a right-side Codex chat panel with Ask, Agent, Edit, and Review modes
+- Agent Hub keeps local per-session JSONL chat history, supplies recent history to agents, and provides controls to view, start, delete, and open the stored logs
+- Agent Hub provides provider-aware login, logout, and account-status controls for Codex, Claude, Ollama, FCC Claude, and API-key agents
 - Command Terminal can start `codex login` to link your ChatGPT/OpenAI account and check login status
 - Command Terminal shows Codex usage as tracked tokens used against a local limit you set
 - Command Intel provides query-once OSINT launchers for usernames, email addresses, domains, IPs, phones, people, and companies, with selected-provider launching and a locally saved investigation workspace
@@ -61,6 +63,8 @@ Command Intel stores its case database and copied evidence under:
 ```
 
 Crash reports are written to `~/.local/state/command-centre/crash.log`. Arch packaging files are under `packaging/arch/`.
+
+The Command Widget installer payload is bundled under `resources/command-widget/`, so installing or updating the widget does not require a separate Command-widget checkout or an internet connection.
 
 Run the automated checks with:
 

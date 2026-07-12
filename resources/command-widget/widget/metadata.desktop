@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Telemetry Widget
+Comment=Shows simple CPU and memory telemetry
+Type=Service
+X-KDE-ServiceTypes=Plasma/Applet
+X-Plasma-API=declarativeappletscript
+X-Plasma-MainScript=ui/main.qml
+X-KDE-PluginInfo-Author=OpenAI
+X-KDE-PluginInfo-Email=
+X-KDE-PluginInfo-Name=telemetrywidget
+X-KDE-PluginInfo-Version=1.0
+X-KDE-PluginInfo-Website=
+X-KDE-PluginInfo-Category=Utilities
+Icon=utilities-system-monitor
