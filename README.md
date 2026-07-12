@@ -20,6 +20,7 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 - Command palette with `Ctrl+K`
 - Main tabs for System Dashboard, System Control, Tool Library, Command Terminal, Offline Knowledge, Deployment Centre, and Software Centre
 - Command Apps catalogue with descriptions, installation-state detection, confirm-first installers, a bundled offline Command Widget installer/update action, and a CommandOS Installer placeholder
+- Command Apps can download the complete protected GitHub `main` branch, update the installed Command Centre files, and restart the application
 - Software Centre includes update checks, package search, confirm-first install/remove actions, Flatpak updates, package list export, and maintenance command previews
 - Software Centre includes a Kernel Manager for listing, installing, and removing kernels through `chwd-kernel`, plus initramfs and GRUB rebuild actions
 - Tool Library auto-refreshes from live pacman, Flatpak, desktop launcher, and executable scans, with launch, terminal, install, and guide actions
@@ -53,6 +54,7 @@ Command Centre.desktop
 
 ## Versions
 
+- `v0.9` adds GitHub `main` updates, bundled Command Widget installation, local HTML previews, persistent agent chat history, and provider authentication controls.
 - `v0.1` is the preserved baseline before the integrated Command Intel case platform.
 - Current development is on the `main` branch.
 

@@ -10,6 +10,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import traceback
@@ -58,6 +59,7 @@ from command_intel import AdvancedCommandIntelPage
 
 
 STATE_FILE = Path.home() / ".local/state/telemetry/telemetry.json"
+APP_VERSION = "0.9.0"
 TELEMETRY_URL = "http://127.0.0.1:9090/telemetry"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
@@ -83,6 +85,7 @@ CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
 FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
 FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
 COMMAND_WIDGET_DIR = APP_DIR / "resources/command-widget"
+COMMAND_CENTRE_UPDATE_URL = "https://github.com/ebfourie7-ops/Command-Centre/archive/refs/heads/main.tar.gz"
 
 
 MODULES = [
@@ -5590,6 +5593,7 @@ class CommandAppsPage(QWidget):
         cards = QGridLayout()
         cards.addWidget(self.command_widget_card(), 0, 0)
         cards.addWidget(self.installer_card(), 0, 1)
+        cards.addWidget(self.command_centre_update_card(), 1, 0, 1, 2)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
 
@@ -5655,6 +5659,95 @@ class CommandAppsPage(QWidget):
         layout.addWidget(placeholder)
         layout.addWidget(button)
         return frame
+
+    def command_centre_update_card(self):
+        frame, layout = self.panel("CC   Command Centre Update")
+        description = QLabel(
+            "Download the complete protected main branch from the official Command Centre GitHub repository and replace the installed application files."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: main\n• System authorization required")
+        details.setObjectName("muted")
+        details.setWordWrap(True)
+        actions = QHBoxLayout()
+        self.command_centre_update = QPushButton("Update from GitHub")
+        self.command_centre_update.setObjectName("primaryButton")
+        self.command_centre_update.clicked.connect(self.update_command_centre)
+        repository = QPushButton("Open Repository")
+        repository.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/ebfourie7-ops/Command-Centre")))
+        actions.addWidget(self.command_centre_update)
+        actions.addWidget(repository)
+        actions.addStretch()
+        layout.addWidget(description)
+        layout.addWidget(details)
+        layout.addLayout(actions)
+        return frame
+
+    def update_command_centre(self):
+        if not command_exists("pkexec"):
+            QMessageBox.warning(self, "Command Centre Update", "pkexec was not found. A graphical system authorization tool is required.")
+            return
+        if not confirm(
+            self,
+            "Update Command Centre",
+            "Download and install every file from the protected GitHub main branch?\n\n"
+            f"{COMMAND_CENTRE_UPDATE_URL}\n\n"
+            "The installed files under /opt/command-centre will be replaced after system authorization.",
+        ):
+            return
+
+        self.command_centre_update.setEnabled(False)
+        self.output.setPlainText("Downloading Command Centre main branch from GitHub…")
+        QApplication.processEvents()
+        try:
+            with tempfile.TemporaryDirectory(prefix="command-centre-update-") as temp_dir:
+                temp_path = Path(temp_dir)
+                archive = temp_path / "command-centre-main.tar.gz"
+                request = urllib.request.Request(COMMAND_CENTRE_UPDATE_URL, headers={"User-Agent": "Command-Centre-Updater"})
+                with urllib.request.urlopen(request, timeout=90) as response, archive.open("wb") as handle:
+                    shutil.copyfileobj(response, handle)
+
+                with tarfile.open(archive, "r:gz") as bundle:
+                    bundle.extractall(temp_path, filter="data")
+                roots = [path for path in temp_path.iterdir() if path.is_dir()]
+                if len(roots) != 1:
+                    raise RuntimeError("The GitHub archive did not contain one project directory.")
+                source = roots[0]
+                required = [
+                    source / "command_centre.py",
+                    source / "command_intel.py",
+                    source / "start.sh",
+                    source / "packaging/arch/command-centre.desktop",
+                    source / "resources/update-command-centre.sh",
+                ]
+                missing = [path.relative_to(source) for path in required if not path.is_file()]
+                if missing:
+                    raise RuntimeError("GitHub archive is incomplete: " + ", ".join(map(str, missing)))
+
+                self.output.setPlainText("Download verified. Waiting for system authorization…")
+                QApplication.processEvents()
+                result = subprocess.run(
+                    ["pkexec", "/bin/bash", str(source / "resources/update-command-centre.sh"), str(source)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                message = (result.stdout + "\n" + result.stderr).strip()
+                if result.returncode != 0:
+                    raise RuntimeError(message or f"Installer exited with code {result.returncode}.")
+        except Exception as error:
+            self.output.setPlainText(f"Command Centre update failed:\n{error}")
+            QMessageBox.warning(self, "Command Centre Update", f"Update failed.\n\n{error}")
+            self.command_centre_update.setEnabled(True)
+            return
+
+        self.output.setPlainText("Command Centre updated successfully from GitHub main. Restarting…")
+        self.parent_window.add_history("Command Centre updated from GitHub main")
+        QMessageBox.information(self, "Command Centre Update", "Update installed successfully. Command Centre will now restart.")
+        subprocess.Popen(["/usr/bin/command-centre"], start_new_session=True)
+        QApplication.quit()
 
     def widget_installed(self):
         widget = Path.home() / ".local/share/plasma/plasmoids/telemetrywidget/metadata.json"
@@ -5974,7 +6067,7 @@ class PaletteDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Command Centre")
+        self.setWindowTitle(f"Command Centre v{APP_VERSION}")
         if LOGO_FILE.exists():
             self.setWindowIcon(QIcon(str(LOGO_FILE)))
         self.resize(1280, 820)
