@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 *.log
 *.pkg.tar.zst
+!/arch-repo/x86_64/*.pkg.tar.zst
 /packaging/arch/pkg/
 /packaging/arch/src/
 inventory/

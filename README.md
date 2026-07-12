@@ -62,6 +62,10 @@ Command Intel stores its case database and copied evidence under:
 
 Crash reports are written to `~/.local/state/command-centre/crash.log`. Arch packaging files are under `packaging/arch/`.
 
+The project includes a pacman-compatible repository under `arch-repo/x86_64`.
+Build or refresh it with `./scripts/update-arch-repo.sh`; local installation and
+repository-signing instructions are in `arch-repo/README.md`.
+
 Privileged and system command activity is recorded in a private rotating JSONL
 audit log at `~/.local/state/command-centre/actions.jsonl`. Developer-facing
 module boundaries and security rules are documented in `ARCHITECTURE.md` and

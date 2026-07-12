@@ -1,6 +1,6 @@
 pkgname=command-centre
-pkgver=0.9.0
-pkgrel=3
+pkgver=1.0.1
+pkgrel=1
 pkgdesc="CommandOS operations dashboard and Command Intel investigation workspace"
 arch=('any')
 url="https://github.com/ebfourie7-ops/Command-Centre"

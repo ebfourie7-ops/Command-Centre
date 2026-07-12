@@ -1,0 +1,5 @@
+*.pkg.tar.zst binary
+*.db binary
+*.files binary
+*.gz binary
+*.sig binary
