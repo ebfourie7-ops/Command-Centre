@@ -1,0 +1,236 @@
+[
+  {
+    "id": "development",
+    "name": "Development",
+    "tier": "primary",
+    "summary": "Project coding workspace with editor, terminal, containers, Git, and local docs.",
+    "environment": {"COMMANDOS_PROFILE": "DEVELOPMENT"},
+    "apps": [
+      {"name": "VS Code", "command": "code", "package": "visual-studio-code-bin", "optional": true},
+      {"name": "Kate", "command": "kate", "package": "kate", "optional": true}
+    ],
+    "terminals": [
+      {"title": "Project Terminal", "cwd": "~/Desktop/Code", "command": "git status; echo; docker ps 2>/dev/null || podman ps 2>/dev/null || true; exec bash"}
+    ],
+    "services": ["docker.service"],
+    "urls": ["http://localhost:3000", "https://developer.mozilla.org"],
+    "folders": ["~/Desktop/Code"],
+    "quick_actions": [
+      {"name": "Docker Status", "command": "docker ps || podman ps"},
+      {"name": "Git Status", "command": "git status"}
+    ],
+    "profiles": ["Python", "Rust", "Go", "Web", "C/C++"]
+  },
+  {
+    "id": "ai_lab",
+    "name": "AI Lab",
+    "tier": "primary",
+    "summary": "Local AI development and model lab with lightweight profile choices.",
+    "environment": {"COMMANDOS_PROFILE": "AI_LAB"},
+    "apps": [
+      {"name": "VS Code", "command": "code", "package": "visual-studio-code-bin", "optional": true},
+      {"name": "Ollama", "command": "ollama", "package": "ollama", "terminal": true, "optional": true},
+      {"name": "GPU Telemetry", "command": "nvidia-smi", "package": "nvidia-utils", "terminal": true, "optional": true}
+    ],
+    "terminals": [
+      {"title": "AI Services", "cwd": "~", "command": "ollama ps 2>/dev/null || true; echo; nvidia-smi 2>/dev/null || true; exec bash"}
+    ],
+    "services": ["ollama.service"],
+    "urls": ["http://localhost:11434", "http://localhost:3000", "http://localhost:8080"],
+    "folders": ["~/Documents", "~/.ollama/models"],
+    "quick_actions": [
+      {"name": "Ollama Models", "command": "ollama list"},
+      {"name": "GPU Watch", "command": "watch -n 1 nvidia-smi"}
+    ],
+    "profiles": ["LLM", "Image Generation", "Speech"]
+  },
+  {
+    "id": "network_operations",
+    "name": "Network Operations",
+    "tier": "primary",
+    "summary": "Diagnostics workspace for packet capture, routes, DNS, bandwidth, and network settings.",
+    "environment": {"COMMANDOS_PROFILE": "NETWORK_OPS"},
+    "apps": [
+      {"name": "Wireshark", "command": "wireshark", "package": "wireshark-qt", "optional": true},
+      {"name": "KDE Network Settings", "command": "kcmshell6 kcm_networkmanagement", "package": "plasma-nm", "optional": true}
+    ],
+    "terminals": [
+      {"title": "Network Monitor", "cwd": "~", "command": "ip addr; echo; ip route; echo; resolvectl status 2>/dev/null || true; exec bash"}
+    ],
+    "urls": ["http://192.168.0.1", "http://192.168.1.1"],
+    "quick_actions": [
+      {"name": "Nmap Local Network", "command": "ip route | awk '/default/ {print $3; exit}'; nmap -sn 192.168.1.0/24"},
+      {"name": "MTR 1.1.1.1", "command": "mtr 1.1.1.1"},
+      {"name": "TCPDump Prompt", "command": "sudo tcpdump -i any"},
+      {"name": "iperf3 Server", "command": "iperf3 -s"}
+    ]
+  },
+  {
+    "id": "security_assessment",
+    "name": "Security Assessment",
+    "tier": "primary",
+    "summary": "Authorized assessment workspace for web, network, wireless, and evidence notes.",
+    "environment": {"COMMANDOS_PROFILE": "SECURITY_ASSESSMENT"},
+    "warning": "Only use this deployment for systems and networks you are authorized to assess.",
+    "apps": [
+      {"name": "Burp Suite", "command": "burpsuite", "package": "burpsuite", "optional": true},
+      {"name": "OWASP ZAP", "command": "zaproxy", "package": "zaproxy", "optional": true},
+      {"name": "Wireshark", "command": "wireshark", "package": "wireshark-qt", "optional": true}
+    ],
+    "terminals": [
+      {"title": "Assessment Terminal", "cwd": "~/Documents", "command": "mkdir -p ~/Documents/CommandOS-Cases; cd ~/Documents/CommandOS-Cases; exec bash"}
+    ],
+    "folders": ["~/Documents/CommandOS-Cases"],
+    "quick_actions": [
+      {"name": "Nmap Service Scan", "command": "read -rp 'Target: ' target; nmap -sV -sC \"$target\""},
+      {"name": "Listening Ports", "command": "ss -tulpn"},
+      {"name": "Wireless Monitor", "command": "airmon-ng"}
+    ],
+    "profiles": ["Web Assessment", "Network Assessment", "Wireless Assessment", "OSINT"]
+  },
+  {
+    "id": "osint_research",
+    "name": "OSINT Research",
+    "tier": "primary",
+    "summary": "Research workspace with browser, notes, DNS/domain tools, and case folder.",
+    "environment": {"COMMANDOS_PROFILE": "OSINT_RESEARCH"},
+    "apps": [
+      {"name": "Brave", "command": "brave", "package": "brave-bin", "optional": true},
+      {"name": "Kate Notes", "command": "kate", "package": "kate", "optional": true}
+    ],
+    "terminals": [
+      {"title": "OSINT Terminal", "cwd": "~/Documents", "command": "mkdir -p ~/Documents/OSINT; cd ~/Documents/OSINT; exec bash"}
+    ],
+    "folders": ["~/Documents/OSINT"],
+    "quick_actions": [
+      {"name": "Whois", "command": "read -rp 'Domain: ' domain; whois \"$domain\""},
+      {"name": "DNS Lookup", "command": "read -rp 'Domain: ' domain; dig \"$domain\" any"},
+      {"name": "Amass", "command": "read -rp 'Domain: ' domain; amass enum -d \"$domain\""}
+    ]
+  },
+  {
+    "id": "radio_operations",
+    "name": "Radio Operations",
+    "tier": "primary",
+    "summary": "SDR and radio workspace with receiver, programming, digital modes, logs, and audio controls.",
+    "environment": {"COMMANDOS_PROFILE": "RADIO_OPS"},
+    "apps": [
+      {"name": "SDR++", "command": "sdrpp", "package": "sdrpp-git", "optional": true},
+      {"name": "GQRX", "command": "gqrx", "package": "gqrx", "optional": true},
+      {"name": "CHIRP", "command": "chirp", "package": "chirp-next", "optional": true},
+      {"name": "QSSTV", "command": "qsstv", "package": "qsstv", "optional": true},
+      {"name": "FLDigi", "command": "fldigi", "package": "fldigi", "optional": true},
+      {"name": "Audio Control", "command": "pavucontrol", "package": "pavucontrol", "optional": true}
+    ],
+    "terminals": [
+      {"title": "Radio Devices", "cwd": "~", "command": "rtl_test -t 2>/dev/null || true; echo; lsusb; exec bash"}
+    ],
+    "folders": ["~/Documents/Radio"],
+    "quick_actions": [
+      {"name": "RTL Test", "command": "rtl_test"},
+      {"name": "HackRF Info", "command": "hackrf_info"},
+      {"name": "Rig Control", "command": "rigctl --help"}
+    ]
+  },
+  {
+    "id": "3d_workshop",
+    "name": "3D Workshop",
+    "tier": "primary",
+    "summary": "3D design and printing workspace with CAD, slicer, project folder, and printer resources.",
+    "environment": {"COMMANDOS_PROFILE": "3D_WORKSHOP"},
+    "apps": [
+      {"name": "FreeCAD", "command": "freecad", "package": "freecad", "optional": true},
+      {"name": "UltiMaker Cura", "command": "flatpak run com.ultimaker.cura", "package": "com.ultimaker.cura", "optional": true},
+      {"name": "OpenSCAD", "command": "openscad", "package": "openscad", "optional": true}
+    ],
+    "folders": ["~/Documents/3D"],
+    "urls": ["http://octopi.local", "http://localhost:7125"],
+    "quick_actions": [
+      {"name": "List STL Files", "command": "find ~/Documents/3D -iname '*.stl' -o -iname '*.3mf' | head -100"}
+    ]
+  },
+  {
+    "id": "system_recovery",
+    "name": "System Recovery",
+    "tier": "primary",
+    "summary": "Repair workspace for disks, SMART data, filesystems, snapshots, ISO/USB tools, and recovery terminals.",
+    "environment": {"COMMANDOS_PROFILE": "SYSTEM_RECOVERY"},
+    "warning": "Disk and recovery tools can destroy data. Review targets carefully before writing, formatting, repairing, or cloning.",
+    "apps": [
+      {"name": "GParted", "command": "gparted", "package": "gparted", "optional": true},
+      {"name": "KDE Partition Manager", "command": "partitionmanager", "package": "partitionmanager", "optional": true},
+      {"name": "Balena Etcher", "command": "balena-etcher", "package": "balena-etcher", "optional": true}
+    ],
+    "terminals": [
+      {"title": "Recovery Terminal", "cwd": "~", "command": "lsblk -f; echo; sudo smartctl --scan 2>/dev/null || true; exec bash"}
+    ],
+    "quick_actions": [
+      {"name": "List Block Devices", "command": "lsblk -f"},
+      {"name": "SMART Scan", "command": "sudo smartctl --scan"},
+      {"name": "Btrfs Snapshots", "command": "snapper list"}
+    ]
+  },
+  {
+    "id": "gaming",
+    "name": "Gaming",
+    "tier": "optional",
+    "summary": "Game platform launcher with performance tools and GPU telemetry.",
+    "apps": [
+      {"name": "Steam", "command": "steam", "package": "steam", "optional": true},
+      {"name": "Heroic", "command": "heroic", "package": "heroic-games-launcher-bin", "optional": true},
+      {"name": "Lutris", "command": "lutris", "package": "lutris", "optional": true},
+      {"name": "ProtonUp-Qt", "command": "protonup-qt", "package": "protonup-qt", "optional": true}
+    ],
+    "quick_actions": [{"name": "GPU Watch", "command": "watch -n 1 nvidia-smi"}]
+  },
+  {
+    "id": "daily_driver",
+    "name": "Daily Driver",
+    "tier": "optional",
+    "summary": "Everyday workspace with browser, chat, file manager, media, and compact Command Centre.",
+    "apps": [
+      {"name": "Brave", "command": "brave", "package": "brave-bin", "optional": true},
+      {"name": "Discord", "command": "discord", "package": "discord", "optional": true},
+      {"name": "Dolphin", "command": "dolphin", "package": "dolphin", "optional": true},
+      {"name": "VLC", "command": "vlc", "package": "vlc", "optional": true}
+    ],
+    "folders": ["~"]
+  },
+  {
+    "id": "content_creation",
+    "name": "Content Creation",
+    "tier": "optional",
+    "summary": "Media creation workspace with recording, editing, image, audio, and project files.",
+    "apps": [
+      {"name": "OBS Studio", "command": "obs", "package": "obs-studio", "optional": true},
+      {"name": "Kdenlive", "command": "kdenlive", "package": "kdenlive", "optional": true},
+      {"name": "GIMP", "command": "gimp-3.2", "package": "gimp", "optional": true},
+      {"name": "Audacity", "command": "audacity", "package": "audacity", "optional": true}
+    ],
+    "folders": ["~/Videos", "~/Pictures"]
+  },
+  {
+    "id": "offline_knowledge",
+    "name": "Offline Knowledge",
+    "tier": "optional",
+    "summary": "Offline documentation and local reference workspace.",
+    "apps": [
+      {"name": "Kiwix", "command": "kiwix-desktop", "package": "kiwix-desktop", "optional": true}
+    ],
+    "folders": ["~/Documents"],
+    "quick_actions": [{"name": "Find ZIM Files", "command": "find ~ -iname '*.zim' 2>/dev/null | head -100"}]
+  },
+  {
+    "id": "field_operations",
+    "name": "Field Operations",
+    "tier": "optional",
+    "summary": "Offline-first field workspace with references, radio, field data folder, and system telemetry.",
+    "apps": [
+      {"name": "Kiwix", "command": "kiwix-desktop", "package": "kiwix-desktop", "optional": true},
+      {"name": "SDR++", "command": "sdrpp", "package": "sdrpp-git", "optional": true},
+      {"name": "Dolphin", "command": "dolphin ~/Documents/Field", "package": "dolphin", "optional": true}
+    ],
+    "folders": ["~/Documents/Field"],
+    "quick_actions": [{"name": "Battery Status", "command": "upower -d"}]
+  }
+]

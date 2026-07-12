@@ -1,0 +1,9 @@
+{
+  "name": "command-centre",
+  "version": "0.1.0",
+  "description": "Base CommandOS operations dashboard and control layer.",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}
