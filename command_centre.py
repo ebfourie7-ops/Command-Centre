@@ -69,7 +69,7 @@ from PySide6.QtWidgets import (
 from command_intel import AdvancedCommandIntelPage
 
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
@@ -169,7 +169,8 @@ DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
 CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
 FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
 FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
-COMMAND_WIDGET_DIR = APP_DIR / "resources/command-widget"
+RESOURCE_DIR = APP_DIR / "resources"
+COMMAND_WIDGET_DIR = RESOURCE_DIR / "command-widget"
 
 
 def harden_private_storage():
@@ -6708,14 +6709,14 @@ class CommandAppsPage(QWidget):
 
     def command_centre_update_card(self):
         frame, layout = self.panel("CC   Command Centre Update")
-        description = QLabel("Direct branch installation is disabled for security. Install reviewed Command Centre packages through the system package manager.")
+        description = QLabel("Update from the signed public Command Centre repository. The updater verifies the repository key and configures pacman when needed.")
         description.setWordWrap(True)
         description.setObjectName("muted")
-        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: Command-Centre.v1\n• System authorization required")
+        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• Signed public Arch repository\n• Command-Centre-v1.0.1\n• System authorization required")
         details.setObjectName("muted")
         details.setWordWrap(True)
         actions = QHBoxLayout()
-        self.command_centre_update = QPushButton("Review Package Update")
+        self.command_centre_update = QPushButton("UPDATE COMMAND CENTRE")
         self.command_centre_update.setObjectName("primaryButton")
         self.command_centre_update.clicked.connect(self.update_command_centre)
         repository = QPushButton("Open Repository")
@@ -6729,13 +6730,27 @@ class CommandAppsPage(QWidget):
         return frame
 
     def update_command_centre(self):
-        command = "sudo pacman -Syu command-centre"
+        installer = RESOURCE_DIR / "install-command-centre-repo.sh"
+        if not installer.is_file():
+            QMessageBox.warning(self, "Command Centre Update", f"Signed repository updater is missing:\n{installer}")
+            return
+        if not confirm(
+            self, "Update Command Centre",
+            "Update Command Centre from its signed public Arch repository?\n\n"
+            "The repository key fingerprint will be verified before trust is added. "
+            "Pacman will request your system password and show the packages before updating.",
+        ):
+            return
+        command = f"/bin/bash {shlex.quote(str(installer))}"
+        ok, terminal = launch_terminal("Update Command Centre", command)
         self.output.setPlainText(
-            "Unsigned installation from a mutable GitHub branch is disabled.\n\n"
-            "Use a reviewed, signed Arch package instead:\n"
-            f"{command}\n\nDevelopment checkouts must be updated through an intentional Git review."
+            f"Signed update started in {terminal}.\n\nRepository key:\n"
+            "D6D2 8256 B728 685F 4D44 26A2 A821 4620 EA12 3648\n\n"
+            "Restart Command Centre after pacman finishes."
+            if ok else terminal
         )
-        QMessageBox.information(self,"Secure Updates","Direct GitHub-to-root updates are disabled. Review and install a signed Command Centre package through Pacman.")
+        if ok:
+            self.parent_window.add_history("Signed Command Centre update started", category="UPDATE")
 
     def widget_installed(self):
         widget = Path.home() / ".local/share/plasma/plasmoids/telemetrywidget/metadata.json"

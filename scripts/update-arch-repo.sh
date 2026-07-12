@@ -45,6 +45,7 @@ fi
 if [[ -f "$repository_root/$repository_name.files.tar.gz.sig" ]]; then
   cp -- "$repository_root/$repository_name.files.tar.gz.sig" "$repository_root/$repository_name.files.sig"
 fi
-rm -f -- "$repository_root/$repository_name.db.tar.gz.old" "$repository_root/$repository_name.files.tar.gz.old"
+rm -f -- "$repository_root/$repository_name.db.tar.gz.old" "$repository_root/$repository_name.files.tar.gz.old" \
+  "$repository_root/$repository_name.db.tar.gz.old.sig" "$repository_root/$repository_name.files.tar.gz.old.sig"
 
 printf 'Repository updated: %s\nPackage: %s\n' "$repository_root" "$(basename -- "$package")"

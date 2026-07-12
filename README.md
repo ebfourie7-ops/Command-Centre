@@ -66,6 +66,42 @@ The project includes a pacman-compatible repository under `arch-repo/x86_64`.
 Build or refresh it with `./scripts/update-arch-repo.sh`; local installation and
 repository-signing instructions are in `arch-repo/README.md`.
 
+## Install on Arch Linux
+
+Import and locally trust the dedicated Command Centre repository key:
+
+```bash
+curl -fsSL \
+  https://ebfourie7-ops.github.io/Command-Centre/arch-repo/command-centre-repo-key.asc \
+  -o /tmp/command-centre-repo-key.asc
+sudo pacman-key --add /tmp/command-centre-repo-key.asc
+sudo pacman-key --lsign-key D6D28256B728685F4D4426A2A8214620EA123648
+```
+
+Verify the fingerprint before trusting it:
+
+```text
+D6D2 8256 B728 685F 4D44 26A2 A821 4620 EA12 3648
+```
+
+Add the repository above the standard repositories in `/etc/pacman.conf`:
+
+```ini
+[command-centre]
+SigLevel = Required DatabaseOptional
+Server = https://ebfourie7-ops.github.io/Command-Centre/arch-repo/x86_64
+```
+
+Install Command Centre normally through pacman:
+
+```bash
+sudo pacman -Syy
+sudo pacman -S command-centre
+```
+
+After installation, the **UPDATE COMMAND CENTRE** button verifies and configures
+this signed repository automatically and opens the normal pacman update flow.
+
 Privileged and system command activity is recorded in a private rotating JSONL
 audit log at `~/.local/state/command-centre/actions.jsonl`. Developer-facing
 module boundaries and security rules are documented in `ARCHITECTURE.md` and
