@@ -52,12 +52,11 @@ ram_display() {
 cpu_temp() {
   local temp
 
-  temp=$(find /sys/class/hwmon -name temp*_input -print 2>/dev/null \
-    | xargs -r cat 2>/dev/null \
+  temp=$(find /sys/class/hwmon -name 'temp*_input' -exec cat {} + 2>/dev/null \
     | awk '$1 > 0 && $1 < 120000 { if ($1 > max) max=$1 } END { if (max) print max }')
 
   if [ -z "$temp" ]; then
-    temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null \
+    temp=$(find /sys/class/thermal -name temp -exec cat {} + 2>/dev/null \
       | awk '$1 > 0 && $1 < 120000 { if ($1 > max) max=$1 } END { if (max) print max }')
   fi
 
@@ -71,8 +70,7 @@ cpu_temp() {
 cpu_frequency() {
   local freq
 
-  freq=$(find /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq -print 2>/dev/null \
-    | xargs -r cat 2>/dev/null \
+  freq=$(find /sys/devices/system/cpu -path '*/cpufreq/scaling_cur_freq' -exec cat {} + 2>/dev/null \
     | awk '$1 > 0 { total += $1; count++ } END { if (count > 0) printf "%.2f GHz", total / count / 1000000 }')
 
   if [ -n "$freq" ]; then

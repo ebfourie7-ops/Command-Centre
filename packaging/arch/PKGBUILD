@@ -1,12 +1,12 @@
 pkgname=command-centre
 pkgver=0.9.0
-pkgrel=1
+pkgrel=2
 pkgdesc="CommandOS operations dashboard and Command Intel investigation workspace"
 arch=('any')
-url="https://localhost/command-centre"
-license=('custom')
-depends=('python' 'pyside6' 'qt6-webengine')
-optdepends=('ollama: local evidence analysis' 'exiftool: metadata inspection' 'nmap: authorized network discovery')
+url="https://github.com/ebfourie7-ops/Command-Centre"
+license=('custom:Command-Centre')
+depends=('python' 'python-cryptography' 'pyside6' 'qt6-webengine')
+optdepends=('ollama: local evidence analysis' 'perl-image-exiftool: metadata inspection' 'nmap: authorized network discovery')
 source=()
 sha256sums=()
 
@@ -19,4 +19,5 @@ package() {
   printf '#!/bin/sh\nexec python /opt/command-centre/command_centre.py "$@"\n' > "$pkgdir/usr/bin/command-centre"
   chmod 755 "$pkgdir/usr/bin/command-centre"
   install -Dm644 "$startdir/command-centre.desktop" "$pkgdir/usr/share/applications/command-centre.desktop"
+  install -Dm644 "$startdir/../../LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

@@ -2,15 +2,16 @@
 import json
 import html
 import hashlib
+import calendar
 import os
 import re
+import signal
 import shlex
 import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import traceback
@@ -20,7 +21,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
+from PySide6.QtCore import QFileSystemWatcher, QPointF, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
     QFileDialog,
     QFrame,
     QFormLayout,
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileSystemModel,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -66,13 +69,89 @@ OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
 CODEX_USAGE_CONFIG = CONFIG_DIR / "codex_usage.json"
 CHAT_LOG_DIR = CONFIG_DIR / "chat-logs"
+AGENT_TASK_DIR = CONFIG_DIR / "agent-tasks"
 AGENT_CONFIG_FILE = CONFIG_DIR / "agent_hub.json"
 USER_DEPLOYMENTS_CONFIG = CONFIG_DIR / "deployment_profiles.json"
 INTEL_CONFIG = CONFIG_DIR / "command_intel.json"
 CONTROL_QUEUE_FILE = CONFIG_DIR / "control_queue.json"
 TOOL_STATE_FILE = CONFIG_DIR / "tool_library_state.json"
 SOFTWARE_HISTORY_FILE = CONFIG_DIR / "software_history.json"
+SYSTEM_EVENTS_DB = CONFIG_DIR / "system_events.db"
 CACHYOS_PACKAGE_CATALOG = Path("/usr/lib/cachyos-pi/pkglist.yaml")
+COMMANDOS_CURATED_CATALOG = {
+    "Audio": [
+        "strawberry", "lollypop", "audacious", "elisa", "kwave", "audacity", "ardour", "lmms",
+        "mixxx", "musescore", "rosegarden",
+    ],
+    "Browsers": [
+        "librewolf-bin", "firefox", "firefox-esr-bin", "firefox-pure", "chromium",
+        "ungoogled-chromium-bin", "vivaldi + vivaldi-ffmpeg-codecs", "torbrowser-launcher",
+        "brave-bin", "floorp-bin", "falkon", "qutebrowser + python-adblock",
+    ],
+    "Communication": [
+        "telegram-desktop", "discord", "neochat", "fractal", "element-desktop", "wire-desktop",
+        "signal-desktop", "mumble",
+    ],
+    "Development": [
+        "vim", "code", "emacs", "qtcreator", "gnome-builder", "kdevelop", "netbeans",
+        "intellij-idea-community-edition", "pycharm-community-edition",
+        "cockpit + cockpit-machines", "ansible", "docker + docker-compose",
+        "podman-docker + podman-compose + crun", "jenkins", "puppet", "prometheus", "terraform",
+    ],
+    "Games": [
+        "cachyos-gaming-applications + cachyos-gaming-meta", "aisleriot", "mari0", "kapman",
+        "knights", "kmahjongg", "supertuxkart", "supertux", "extremetuxracer", "0ad",
+        "teeworlds", "xonotic", "hedgewars",
+    ],
+    "Graphics": [
+        "krita + krita-plugin-gmic + opencolorio", "gimp", "inkscape", "blender", "digikam",
+        "darktable", "luminancehdr", "kolourpaint", "mypaint", "sweethome3d", "freecad",
+        "librecad", "kicad", "pencil2d", "synfigstudio", "opentoonz", "fontforge", "birdfont",
+    ],
+    "Hardware Tools": [
+        "amdgpu_top", "cachyos-benchmarker", "coolercontrol", "cpu-x", "gparted", "kdiskmark",
+        "lact", "nvtop", "occt", "openlinkhub", "openrgb", "rog-control-center",
+    ],
+    "Internet": [
+        "xdman", "freedownloadmanager", "deluge-gtk", "qbittorrent", "nextcloud-client", "remmina",
+        "filezilla", "putty", "warpinator", "nitroshare", "jdownloader2",
+    ],
+    "Mail": ["thunderbird", "kmail", "evolution", "geary", "mailspring", "claws-mail"],
+    "Multimedia": [
+        "hypnotix", "shortwave", "converseen", "handbrake", "transmageddon", "soundconverter",
+        "kodi + kodi-platform + kodi-eventclients", "mediaelch", "kid3", "easytag",
+        "k3b + cdparanoia + cdrdao + dvd+rw-tools + emovix + vcdimager + cdrtools",
+        "brasero", "xfburn",
+    ],
+    "Office": [
+        "libreoffice-fresh + libmythes", "libreoffice-still + libmythes", "joplin", "onlyoffice-bin",
+        "wps-office + wps-office-mime", "yozo-office + yozo-office-fonts", "calligra", "skrooge",
+        "kmymoney", "abiword", "gnumeric", "gnucash", "homebank",
+    ],
+    "Other": ["scrcpy", "variety"],
+    "Video": [
+        "kdenlive + movit + sox + opus-tools + frei0r-plugins + opentimelineio + dvgrab + opencv",
+        "dragon", "shotcut", "pitivi + frei0r-plugins", "obs-studio", "vlc",
+        "smplayer + smplayer-skins + smplayer-themes", "baka-mplayer",
+    ],
+    "Virtualization": ["virtualbox", "gnome-boxes", "virt-manager"],
+}
+CURATED_CATEGORY_DESCRIPTIONS = {
+    "Audio": "Music playback, recording, production, DJ, notation, or audio editing application.",
+    "Browsers": "Web browser selected for privacy, compatibility, or specialized workflows.",
+    "Communication": "Messaging, collaboration, voice, or secure communication client.",
+    "Development": "Development, automation, container, infrastructure, or operations tooling.",
+    "Games": "Game or curated gaming platform package for CommandOS.",
+    "Graphics": "Graphics, photography, animation, CAD, publishing, or creative-design application.",
+    "Hardware Tools": "Hardware monitoring, configuration, benchmarking, or diagnostics utility.",
+    "Internet": "Download, remote access, file transfer, synchronization, or network utility.",
+    "Mail": "Desktop email and personal-information management client.",
+    "Multimedia": "Media conversion, playback, tagging, streaming, or optical-disc application.",
+    "Office": "Documents, notes, finance, spreadsheets, or office productivity suite.",
+    "Other": "Useful desktop utility selected for CommandOS.",
+    "Video": "Video playback, capture, editing, streaming, or production application.",
+    "Virtualization": "Virtual machine creation and management platform.",
+}
 DEPLOYMENT_STATE_FILE = CONFIG_DIR / "deployment_state.json"
 APP_DIR = Path(__file__).resolve().parent
 DEVELOPMENT_LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
@@ -85,18 +164,121 @@ CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
 FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
 FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
 COMMAND_WIDGET_DIR = APP_DIR / "resources/command-widget"
-COMMAND_CENTRE_UPDATE_URL = "https://github.com/ebfourie7-ops/Command-Centre/archive/refs/heads/main.tar.gz"
+
+
+def harden_private_storage():
+    """Restrict Command Centre state, chats, tasks, and investigations to this user."""
+    roots = [CONFIG_DIR, Path.home() / ".local/share/command-centre", Path.home() / ".local/state/command-centre"]
+    for root in roots:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try: root.chmod(0o700)
+        except OSError: pass
+        for path in root.rglob("*"):
+            try:
+                if path.is_symlink(): continue
+                path.chmod(0o700 if path.is_dir() else 0o600)
+            except OSError: pass
+
+
+class SystemEventStore:
+    """Persistent, structured event timeline shared by Command Centre surfaces."""
+
+    def __init__(self, path=SYSTEM_EVENTS_DB):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        path.chmod(0o600)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS system_events (
+                id INTEGER PRIMARY KEY,
+                created_utc TEXT NOT NULL,
+                category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                source_app TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                action_id TEXT DEFAULT '',
+                dedupe_key TEXT DEFAULT ''
+            )
+        """)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_system_events_created ON system_events(created_utc DESC)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)")
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS observed_state (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL,
+                updated_utc TEXT NOT NULL
+            )
+        """)
+        # Remove early implementation noise; these were startup messages rather
+        # than meaningful state transitions.
+        self.db.execute(
+            "DELETE FROM system_events WHERE title IN ('Dashboard monitoring started', 'Telemetry connected')"
+        )
+        self.db.commit()
+
+    def add(self, category, title, severity="INFO", event_type="state", detail="", evidence=None, action_id="", dedupe_key="", dedupe_seconds=300):
+        now_epoch = int(time.time())
+        created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_epoch))
+        if dedupe_key:
+            recent = self.db.execute(
+                "SELECT created_utc FROM system_events WHERE dedupe_key=? ORDER BY id DESC LIMIT 1",
+                (dedupe_key,),
+            ).fetchone()
+            if recent:
+                try:
+                    previous = calendar.timegm(time.strptime(recent["created_utc"], "%Y-%m-%dT%H:%M:%SZ"))
+                    if now_epoch - previous < dedupe_seconds:
+                        return False
+                except ValueError:
+                    pass
+        self.db.execute(
+            "INSERT INTO system_events(created_utc,category,severity,source_app,event_type,title,detail,evidence_json,action_id,dedupe_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (created, category.upper(), severity.upper(), "Command Centre", event_type, title, detail, json.dumps(evidence or {}), action_id, dedupe_key),
+        )
+        self.db.commit()
+        return True
+
+    def recent(self, limit=100, category="ALL"):
+        if category == "ALL":
+            return self.db.execute("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return self.db.execute("SELECT * FROM system_events WHERE category=? ORDER BY id DESC LIMIT ?", (category, limit)).fetchall()
+
+    def observed_states(self):
+        return {row["state_key"]: row["state_value"] for row in self.db.execute("SELECT state_key,state_value FROM observed_state")}
+
+    def save_observed_states(self, states):
+        updated = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.db.executemany(
+            "INSERT INTO observed_state(state_key,state_value,updated_utc) VALUES(?,?,?) "
+            "ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value,updated_utc=excluded.updated_utc",
+            [(key, json.dumps(value, sort_keys=True), updated) for key, value in states.items()],
+        )
+        self.db.commit()
+
+    @staticmethod
+    def decode_observed_states(states):
+        decoded = {}
+        for key, value in states.items():
+            try: decoded[key] = json.loads(value)
+            except (TypeError, ValueError): decoded[key] = value
+        return decoded
+
+    def close(self):
+        self.db.close()
 
 
 MODULES = [
     ("dashboard", "SY", "System Dashboard"),
-    ("control", "SC", "System Control"),
     ("tools", "TL", "Tool Library"),
     ("command_apps", "CA", "Command Apps"),
     ("command_code", "CT", "Command Terminal"),
     ("intel", "CI", "Command Intel"),
     ("offline", "OK", "Offline Knowledge"),
-    ("deployment", "DP", "Deployment Centre"),
     ("software", "SW", "Software Centre"),
 ]
 
@@ -302,6 +484,40 @@ def command_exists(command):
     return shutil.which(command) is not None
 
 
+def detected_gpu_devices():
+    """Return every DRM GPU, including hybrid-system integrated graphics."""
+    devices = []
+    seen_slots = set()
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        if not re.fullmatch(r"card\d+", card.name):
+            continue
+        device = card / "device"
+        try:
+            slot = device.resolve().name
+            vendor = (device / "vendor").read_text().strip().lower()
+        except (OSError, FileNotFoundError):
+            continue
+        if slot in seen_slots:
+            continue
+        seen_slots.add(slot)
+
+        output = run_text(["lspci", "-s", slot], 2)[0] if command_exists("lspci") else ""
+        match = re.search(r"(?:VGA compatible|3D|Display) controller:\s*(.+?)(?:\s+\(rev\s+[0-9a-f]+\))?$", output, re.I)
+        name = match.group(1).strip() if match else {
+            "0x1002": "AMD GPU",
+            "0x8086": "Intel GPU",
+            "0x10de": "NVIDIA GPU",
+        }.get(vendor, "Graphics device")
+        devices.append({"name": name, "vendor": vendor, "slot": slot})
+
+    if len(devices) > 1:
+        for gpu in devices:
+            gpu["type"] = "Discrete" if gpu["vendor"] == "0x10de" else "Integrated"
+    elif devices:
+        devices[0]["type"] = "GPU"
+    return devices
+
+
 def vscode_codex_candidates():
     extension_dir = Path.home() / ".vscode/extensions"
     candidates = extension_dir.glob("openai.chatgpt-*/bin/linux-x86_64/codex")
@@ -411,19 +627,32 @@ class CockpitCard(QFrame):
         self.body.setWordWrap(True)
         self.body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.click_handler = None
 
         layout = QVBoxLayout(self)
+        self.content_layout = layout
         layout.addWidget(self.title)
         layout.addWidget(self.body)
 
     def set_text(self, text):
         self.body.setText(text)
 
+    def set_click_handler(self, handler):
+        self.click_handler = handler
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Open details")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.click_handler:
+            self.click_handler()
+        super().mousePressEvent(event)
+
 
 class Sparkline(QWidget):
     def __init__(self, color="#49bfff", parent=None):
         super().__init__(parent)
-        self.values = deque(maxlen=24)
+        # Five-second samples retained for a rolling ten-minute dashboard view.
+        self.values = deque(maxlen=120)
         self.color = QColor(color)
         self.setMinimumHeight(42)
         self.setMaximumHeight(42)
@@ -466,6 +695,8 @@ class TelemetryCard(QFrame):
     def __init__(self, title, color="#49bfff"):
         super().__init__()
         self.setObjectName("card")
+        self.setMaximumHeight(246)
+        self.click_handler = None
         self.title = QLabel(title)
         self.title.setObjectName("panelTitle")
         self.value = QLabel("--")
@@ -475,17 +706,30 @@ class TelemetryCard(QFrame):
         self.detail.setWordWrap(True)
         self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.sparkline = Sparkline(color)
+        self.sparkline.setMinimumHeight(41)
+        self.sparkline.setMaximumHeight(41)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(4)
         layout.addWidget(self.title)
         layout.addWidget(self.value)
         layout.addWidget(self.detail)
-        layout.addStretch()
         layout.addWidget(self.sparkline)
 
     def set_metric(self, value, detail, history_value):
         self.value.setText(value)
         self.detail.setText(detail)
         self.sparkline.add_value(history_value)
+
+    def set_click_handler(self, handler):
+        self.click_handler = handler
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Open details")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.click_handler:
+            self.click_handler()
+        super().mousePressEvent(event)
 
 
 class DashboardPage(QWidget):
@@ -497,33 +741,43 @@ class DashboardPage(QWidget):
         self.header.setObjectName("healthHeader")
         self.header.setWordWrap(True)
         self.header.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.hero_logo = QLabel()
-        self.hero_logo.setObjectName("heroLogo")
-        self.hero_logo.setFixedSize(168, 126)
-        self.hero_logo.setAlignment(Qt.AlignCenter)
-        if SPLASH_FILE.exists():
-            pixmap = QPixmap(str(SPLASH_FILE))
-            self.hero_logo.setPixmap(pixmap.scaled(168, 126, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            self.hero_logo.setText("C>")
 
         self.cpu = TelemetryCard("CPU", "#49bfff")
         self.gpu = TelemetryCard("GPU", "#ad7cff")
         self.memory = TelemetryCard("MEMORY", "#42d989")
         self.storage_summary = TelemetryCard("STORAGE", "#f0b84b")
         self.health = CockpitCard("SYSTEM HEALTH")
+        self.health.setMaximumHeight(150)
         self.readiness = CockpitCard("COMMANDOS READINESS")
-        self.processes = CockpitCard("RESOURCE CONSUMERS · CPU")
+        self.readiness_bar = QProgressBar()
+        self.readiness_bar.setRange(0, 100)
+        self.readiness_bar.setTextVisible(True)
+        self.readiness.content_layout.addWidget(self.readiness_bar)
+        readiness_details = QPushButton("VIEW SCORE BREAKDOWN")
+        readiness_details.clicked.connect(self.show_readiness_breakdown)
+        self.readiness.content_layout.addWidget(readiness_details)
+        self.power = CockpitCard("BATTERY & POWER")
+        self.network = CockpitCard("NETWORK HEALTH")
+        self.security = CockpitCard("SECURITY POSTURE")
+        self.storage_health = CockpitCard("DISK & SNAPSHOT HEALTH")
+        self.kernel_state = CockpitCard("KERNEL & DRIVER STATE")
+        for card in (self.power, self.network, self.security, self.storage_health, self.kernel_state):
+            card.setMaximumHeight(140)
         self.activity = CockpitCard("RECENT ACTIVITY")
+        self.activity.setMinimumHeight(180)
+        timeline_button = QPushButton("VIEW FULL SYSTEM TIMELINE")
+        timeline_button.clicked.connect(self.parent_window.show_system_timeline)
+        self.activity.content_layout.addWidget(timeline_button)
         self.alerts_frame, self.alerts_layout = self.panel("ALERTS & RECOMMENDATIONS")
+        self.alerts_frame.setMinimumHeight(210)
+        self.alerts_details = QPushButton("OPEN ACTION CENTRE")
+        self.alerts_details.clicked.connect(lambda: self.open_detail("alerts"))
         self.quick_frame, quick_layout = self.panel("QUICK ACTIONS")
         actions = QGridLayout()
         for index, (label, callback) in enumerate([
             ("CHECK UPDATES", lambda: self.parent_window.open_module("software")),
-            ("SYSTEM CONTROL", lambda: self.parent_window.open_module("control")),
             ("OPEN TERMINAL", lambda: self.parent_window.open_module("command_code")),
             ("SYSTEM INFORMATION", self.open_system_information),
-            ("RUN DIAGNOSTICS", lambda: self.parent_window.open_module("control")),
             ("TELEMETRY STATUS", self.show_telemetry_status),
         ]):
             button = QPushButton(label)
@@ -531,17 +785,34 @@ class DashboardPage(QWidget):
             actions.addWidget(button, index // 2, index % 2)
         quick_layout.addLayout(actions)
 
+        for key, card in {
+            "cpu": self.cpu, "gpu": self.gpu, "memory": self.memory,
+            "storage": self.storage_summary, "power": self.power,
+            "network": self.network, "security": self.security,
+            "disk": self.storage_health, "kernel": self.kernel_state,
+            "readiness": self.readiness,
+        }.items():
+            card.set_click_handler(lambda selected=key: self.open_detail(selected))
+
         metrics = QGridLayout()
         for index, card in enumerate([self.cpu, self.gpu, self.memory, self.storage_summary]):
             metrics.addWidget(card, 0, index)
 
-        middle = QGridLayout()
-        middle.addWidget(self.health, 0, 0)
-        middle.addWidget(self.readiness, 0, 1)
-        middle.addWidget(self.alerts_frame, 1, 0)
-        middle.addWidget(self.processes, 1, 1)
-        middle.setColumnStretch(0, 1)
-        middle.setColumnStretch(1, 1)
+        status_grid = QGridLayout()
+        status_grid.addWidget(self.power, 0, 0)
+        status_grid.addWidget(self.network, 0, 1)
+        status_grid.addWidget(self.kernel_state, 0, 2)
+        status_grid.addWidget(self.security, 1, 0)
+        status_grid.addWidget(self.storage_health, 1, 1)
+        status_grid.addWidget(self.health, 1, 2)
+        for column in range(3):
+            status_grid.setColumnStretch(column, 1)
+
+        readiness_alerts = QGridLayout()
+        readiness_alerts.addWidget(self.readiness, 0, 0)
+        readiness_alerts.addWidget(self.alerts_frame, 0, 1)
+        readiness_alerts.setColumnStretch(0, 1)
+        readiness_alerts.setColumnStretch(1, 1)
 
         bottom = QGridLayout()
         bottom.addWidget(self.activity, 0, 0)
@@ -553,8 +824,9 @@ class DashboardPage(QWidget):
         layout.setSpacing(14)
         layout.addWidget(self.hero_panel())
         layout.addLayout(metrics)
-        layout.addLayout(middle)
-        layout.addLayout(bottom)
+        layout.addLayout(status_grid)
+        layout.addLayout(readiness_alerts, 1)
+        layout.addLayout(bottom, 1)
 
     def panel(self, title):
         frame = QFrame()
@@ -569,8 +841,8 @@ class DashboardPage(QWidget):
         frame = QFrame()
         frame.setObjectName("hero")
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(22, 18, 22, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(18, 9, 18, 9)
+        layout.setSpacing(6)
 
         copy = QVBoxLayout()
         eyebrow = QLabel("COMMAND CENTRE")
@@ -579,23 +851,22 @@ class DashboardPage(QWidget):
         title.setObjectName("heroTitle")
         subtitle = QLabel("ONE SYSTEM, ONE MISSION")
         subtitle.setObjectName("heroSubtitle")
-        copy.addStretch()
         copy.addWidget(eyebrow)
         copy.addWidget(title)
         copy.addWidget(subtitle)
         copy.addWidget(self.header)
-        copy.addStretch()
 
         layout.addLayout(copy, 1)
-        layout.addWidget(self.hero_logo)
         return frame
 
     def refresh(self, data, system):
+        self.latest_data = dict(data)
+        self.latest_system = dict(system)
         issues = self.issue_list(data, system)
         health = "HEALTHY"
-        if len(issues) >= 4:
+        if any(issue[0] == "CRITICAL" for issue in issues):
             health = "CRITICAL"
-        elif len(issues) >= 2:
+        elif sum(issue[0] == "WARNING" for issue in issues) >= 2:
             health = "DEGRADED"
         elif issues:
             health = "WARNING"
@@ -610,12 +881,16 @@ class DashboardPage(QWidget):
 
         self.cpu.set_metric(
             f"{float(data.get('cpu_usage') or 0):.1f}%",
-            f"{metric_value(data, 'cpu_temp', 'n/a')}°C  ·  {metric_value(data, 'cpu_frequency', 'n/a')}  ·  Load {system.get('load', '--')}",
+            f"{metric_value(data, 'cpu_temp', 'n/a')}°C  ·  {metric_value(data, 'cpu_frequency', 'n/a')}  ·  Load {system.get('load', '--')}\n"
+            f"Governor {system.get('cpu_governor', 'unknown')}  ·  Profile {metric_value(data, 'power_profile_label', 'unknown')}",
             data.get("cpu_usage") if data else None,
         )
         self.gpu.set_metric(
             f"{float(data.get('gpu_usage') or 0):.0f}%",
-            f"{metric_value(data, 'gpu_temp', 'n/a')}°C  ·  {metric_value(data, 'gpu_vram', 'VRAM n/a')} VRAM\n{metric_value(data, 'gpu_name', 'GPU not reported')}",
+            f"{metric_value(data, 'gpu_temp', 'n/a')}°C  ·  {metric_value(data, 'gpu_vram', 'VRAM n/a')} VRAM\n"
+            + ("\n".join(f"{gpu['type']}: {gpu['name']}" for gpu in data.get("gpu_devices", []))
+               or metric_value(data, 'gpu_name', 'GPU not reported'))
+            + f"\nDriver {system.get('gpu_driver', 'unknown')}  ·  {system.get('gpu_state', 'state unknown')}  ·  {system.get('gpu_power', '--')}",
             data.get("gpu_usage") if data else None,
         )
         self.memory.set_metric(
@@ -630,49 +905,201 @@ class DashboardPage(QWidget):
         )
 
         self.health.set_text("\n".join(self.health_lines(data, system)))
-        self.readiness.set_text("\n".join(self.readiness_lines(data, system)))
-        self.processes.set_text("\n".join(system.get("top_processes", ["No process data"])))
+        score, deductions, readiness = self.readiness_result(data, system)
+        self.readiness_bar.setValue(score)
+        self.readiness.set_text("\n".join(readiness))
+        self.readiness_deductions = deductions
+        battery = system.get("battery", {})
+        self.power.set_text(
+            f"{data.get('battery_percent', '--')}% · {battery.get('status', data.get('battery_status', 'Unknown'))}\n"
+            f"Health {battery.get('health', '--')} · Draw {battery.get('power', data.get('battery_watts', '--'))}\n"
+            f"Profile {metric_value(data, 'power_profile_label', 'Unknown')}"
+        )
+        self.network.set_text(
+            f"{system.get('connection', 'Unknown')} · {system.get('local_ip', '--')}\n"
+            f"VPN {data.get('vpn_status', 'Unknown')} · Latency {system.get('latency', '--')}\n"
+            f"↓ {data.get('network_down', '0 B/s')} · ↑ {data.get('network_up', '0 B/s')} · DNS {system.get('dns', 'Unknown')}"
+        )
+        security = system.get("security", {})
+        self.security.set_text(
+            f"Firewall {system.get('firewall', 'Unknown')} · Secure Boot {security.get('secure_boot', 'Unknown')}\n"
+            f"Disk encryption {security.get('encryption', 'Unknown')} · SSH {security.get('ssh', 'Unknown')}\n"
+            f"Listening ports {security.get('ports', '--')} · Updates {system.get('updates', 'unknown')}"
+        )
+        self.storage_health.set_text(
+            f"Root {data.get('storage_percent', '--')}% · {system.get('storage_health', 'Unknown')}\n"
+            f"Snapshots {system.get('snapshot', 'Unavailable')}\nFilesystem {system.get('filesystem', 'Unknown')}"
+        )
+        self.kernel_state.set_text(
+            f"Kernel {system.get('kernel', '--')}\nNVIDIA {system.get('gpu_driver', 'not detected')} · {system.get('gpu_state', 'unknown')}\n"
+            f"Boot {system.get('boot_time', '--')} · Reboot {system.get('reboot_required', 'not required')}"
+        )
         self.render_alerts(issues)
         self.activity.set_text("\n".join(system.get("activity", ["No recent activity recorded."])))
 
-    def readiness_lines(self, data, system):
+    def open_detail(self, key):
+        data = getattr(self, "latest_data", {})
+        system = getattr(self, "latest_system", {})
+        titles = {
+            "cpu": "CPU DETAILS", "gpu": "GPU DETAILS", "memory": "MEMORY DETAILS",
+            "storage": "STORAGE ACTIVITY", "power": "BATTERY & POWER",
+            "network": "NETWORK DETAILS", "security": "SECURITY REPORT",
+            "disk": "DISK & SNAPSHOT DETAILS", "kernel": "KERNEL & DRIVER DETAILS",
+            "readiness": "READINESS SCORE", "alerts": "ACTION CENTRE",
+        }
+        content = self.detail_content(key, data, system)
+        self.parent_window.open_dashboard_drawer(titles.get(key, "SYSTEM DETAILS"), content)
+
+    def detail_content(self, key, data, system):
+        if key == "cpu":
+            processes = "\n".join(system.get("top_processes", ["Unavailable"]))
+            return (
+                f"STATE\nUsage                 {data.get('cpu_usage', '--')}%\n"
+                f"Temperature           {data.get('cpu_temp', '--')}°C\n"
+                f"Frequency             {data.get('cpu_frequency', '--')}\n"
+                f"Governor              {system.get('cpu_governor', 'unknown')}\n"
+                f"System load           {system.get('load', '--')}\n\nTOP PROCESSES\n{processes}\n\n"
+                "HISTORY\nThe dashboard graph contains the latest ten minutes of five-second samples."
+            )
+        if key == "gpu":
+            query = run_text(["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"], 3)[0] if command_exists("nvidia-smi") else ""
+            pmon = run_text(["nvidia-smi", "pmon", "-c", "1"], 3)[0] if command_exists("nvidia-smi") else ""
+            processes = query or "No compute processes reported."
+            graphics = "\n".join(line for line in pmon.splitlines() if line.strip() and not line.lstrip().startswith("#")) or "No graphics clients reported."
+            devices = "\n".join(f"{gpu['type']}: {gpu['name']} ({gpu['slot']})" for gpu in data.get("gpu_devices", [])) or "No GPU devices reported."
+            return (
+                f"DEVICES\n{devices}\n\nSTATE\nPower state           {system.get('gpu_state', 'unknown')}\n"
+                f"Power draw            {system.get('gpu_power', '--')}\nTemperature           {data.get('gpu_temp', '--')}°C\n"
+                f"Utilization           {data.get('gpu_usage', '--')}%\nVRAM                  {data.get('gpu_vram', '--')}\n"
+                f"Driver                {system.get('gpu_driver', 'unknown')}\n\nCOMPUTE PROCESSES\n{processes}\n\n"
+                f"GRAPHICS CLIENTS\n{graphics}\n\nPOWER ANALYSIS\nFrequent NVIDIA polling can itself keep a hybrid GPU awake."
+            )
+        if key == "memory":
+            free = run_text(["free", "-h"], 2)[0]
+            return f"MEMORY\nUsage                 {data.get('ram_usage', '--')}%\n{data.get('ram_info', '--')}\nSwap {system.get('swap', '--')}\n\nSYSTEM DETAIL\n{free or 'Unavailable'}"
+        if key in ("storage", "disk"):
+            disks = run_text(["lsblk", "-o", "NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS"], 3)[0]
+            return (
+                f"ROOT FILESYSTEM\nUsage                 {data.get('storage_percent', '--')}%\n"
+                f"Capacity              {data.get('storage_usage', '--')}\nFilesystem            {system.get('filesystem', 'Unknown')}\n"
+                f"Health                {system.get('storage_health', 'Unknown')}\nSnapshots             {system.get('snapshot', 'Unavailable')}\n\n"
+                f"DEVICES\n{disks or 'Unavailable'}"
+            )
+        if key == "power":
+            battery = system.get("battery", {})
+            return (
+                f"BATTERY\nCharge                {data.get('battery_percent', '--')}%\nStatus                {battery.get('status', 'Unknown')}\n"
+                f"Health                {battery.get('health', 'Unknown')}\nCurrent draw          {battery.get('power', '--')}\n\n"
+                f"POWER\nProfile               {data.get('power_profile_label', 'Unknown')}\nCPU governor          {system.get('cpu_governor', 'unknown')}"
+            )
+        if key == "network":
+            routes = run_text(["ip", "route"], 2)[0]
+            return (
+                f"CONNECTION\nState                 {system.get('connection', 'Unknown')}\nInterface             {data.get('network_iface', '--')}\n"
+                f"Local IP              {system.get('local_ip', '--')}\nVPN                   {data.get('vpn_status', 'Unknown')}\n"
+                f"Latency               {system.get('latency', '--')}\nDNS                   {system.get('dns', 'Unknown')}\n"
+                f"Download              {data.get('network_down', '0 B/s')}\nUpload                {data.get('network_up', '0 B/s')}\n\nROUTES\n{routes or 'Unavailable'}"
+            )
+        if key == "security":
+            security = system.get("security", {})
+            return (
+                f"SECURITY POSTURE\nFirewall              {system.get('firewall', 'Unknown')}\nSecure Boot           {security.get('secure_boot', 'Unknown')}\n"
+                f"Root encryption       {security.get('encryption', 'Unknown')}\nSSH service           {security.get('ssh', 'Unknown')}\n"
+                f"Listening ports       {security.get('ports', '--')}\nPending updates       {system.get('updates', 'unknown')}\n\n"
+                "Important system changes are never applied automatically."
+            )
+        if key == "kernel":
+            return (
+                f"KERNEL\nCurrent               {system.get('kernel', '--')}\nBoot time             {system.get('boot_time', '--')}\n"
+                f"Reboot                {system.get('reboot_required', 'unknown')}\n\nNVIDIA\nDriver                {system.get('gpu_driver', 'not detected')}\n"
+                f"State                 {system.get('gpu_state', 'unknown')}\nPower                 {system.get('gpu_power', '--')}"
+            )
+        if key == "readiness":
+            deductions = getattr(self, "readiness_deductions", [])
+            return "SCORE CALCULATION\n\n" + ("\n\n".join(f"−{points}  {label}\nEvidence: {evidence}" for label, points, evidence in deductions) or "No active deductions.")
+        if key == "alerts":
+            issues = self.issue_list(data, system)
+            return "ACTION CENTRE\n\n" + ("\n\n".join(f"{severity}\n{message}\nRecommended view: {action}" for severity, message, module, action in issues) or "No active recommendations.")
+        return "No detail provider is available."
+
+    def readiness_result(self, data, system):
+        score = 100
+        deductions = []
+        failed = system.get("failed", 0)
+        cpu_temp = float(data.get("cpu_temp") or 0)
+        gpu_temp = float(data.get("gpu_temp") or 0)
+        updates = system.get("updates") or 0
         network_ready = system.get("connection") not in (None, "Unknown", "Offline")
-        security_ready = system.get("firewall") == "Enabled"
-        return [
-            f"SYSTEM          {'READY' if data and system.get('failed', 0) == 0 else 'ATTENTION'}",
-            f"NETWORK         {'READY' if network_ready else 'OFFLINE'}  ·  {system.get('connection', 'Unknown')}",
-            f"SECURITY        {'READY' if security_ready else 'ATTENTION'}  ·  Firewall {system.get('firewall', 'Unknown')}",
-            f"TELEMETRY       {'READY' if data else 'UNAVAILABLE'}",
-            f"STORAGE         {'READY' if float(data.get('storage_percent') or 0) < 85 else 'ATTENTION'}",
+        security = system.get("security", {})
+        storage_percent = float(data.get("storage_percent") or 0)
+        def deduct(label, points, evidence):
+            nonlocal score
+            score -= points
+            deductions.append((label, points, evidence))
+        if failed: deduct("Failed services", min(20, 8 + failed * 3), f"{failed} failed")
+        if max(cpu_temp, gpu_temp) >= 80: deduct("Critical temperature", 15, f"Peak {max(cpu_temp, gpu_temp):.0f}°C")
+        elif max(cpu_temp, gpu_temp) >= 70: deduct("Elevated temperature", 6, f"Peak {max(cpu_temp, gpu_temp):.0f}°C")
+        if system.get("firewall") != "Enabled": deduct("Firewall inactive", 6, system.get("firewall", "Unknown"))
+        if security.get("secure_boot") == "Disabled": deduct("Secure Boot disabled", 4, "Firmware reports disabled")
+        if security.get("encryption") == "Disabled": deduct("Root disk not encrypted", 5, "Root is not mapper-backed")
+        if updates: deduct("Pending updates", min(5, updates), f"{updates} available")
+        if not network_ready: deduct("Network offline", 10, system.get("connection", "Unknown"))
+        if storage_percent >= 90: deduct("Storage critically full", 15, f"{storage_percent:.0f}%")
+        elif storage_percent >= 80: deduct("Storage filling up", 7, f"{storage_percent:.0f}%")
+        if system.get("snapshot") in ("Unavailable", "None found"): deduct("No verified snapshot", 5, system.get("snapshot", "Unknown"))
+        score = max(0, score)
+        lines = [
+            f"COMMAND OS READINESS                         {score}%",
+            f"SYSTEM       {'READY' if data and failed == 0 else 'WARNING':<10} {failed} failed service(s)",
+            f"THERMALS     {'READY' if max(cpu_temp, gpu_temp) < 70 else 'WARNING':<10} Peak {max(cpu_temp, gpu_temp):.0f}°C",
+            f"SECURITY     {'READY' if system.get('firewall') == 'Enabled' and not updates else 'WARNING':<10} {updates} update(s)",
+            f"NETWORK      {'READY' if network_ready else 'OFFLINE':<10} {system.get('latency', '--')}",
+            f"STORAGE      {'READY' if storage_percent < 80 else 'WARNING':<10} Root {storage_percent:.0f}%",
+            f"BACKUP       {'READY' if system.get('snapshot') not in ('Unavailable', 'None found') else 'WARNING':<10} {system.get('snapshot', 'Unknown')}",
+            f"DRIVERS      {'READY' if system.get('gpu_driver') not in ('unknown', 'not detected') else 'CHECK':<10} NVIDIA {system.get('gpu_state', 'unknown')}",
         ]
+        return score, deductions, lines
+
+    def show_readiness_breakdown(self):
+        deductions = getattr(self, "readiness_deductions", [])
+        if deductions:
+            detail = "\n".join(f"−{points:>2}  {label}\n     Evidence: {evidence}" for label, points, evidence in deductions)
+        else:
+            detail = "No readiness deductions are currently active."
+        QMessageBox.information(self, "Command OS Readiness Breakdown", detail)
 
     def render_alerts(self, issues):
         while self.alerts_layout.count() > 1:
             item = self.alerts_layout.takeAt(1)
             if item.widget():
-                item.widget().deleteLater()
+                if item.widget() is self.alerts_details:
+                    item.widget().setParent(None)
+                else:
+                    item.widget().deleteLater()
         if not issues:
             label = QLabel("OK  No immediate recommendations.")
             label.setObjectName("muted")
             self.alerts_layout.addWidget(label)
+            self.alerts_layout.addWidget(self.alerts_details)
             return
-        for message, module_id, action in issues[:4]:
+        for severity, message, module_id, action in issues[:5]:
             row = QFrame()
             row.setObjectName("alertRow")
             row_layout = QHBoxLayout(row)
-            label = QLabel(message)
+            label = QLabel(f"{severity:<9}  {message}")
             label.setWordWrap(True)
             row_layout.addWidget(label, 1)
             button = QPushButton(action)
             button.clicked.connect(lambda checked=False, target=module_id: self.parent_window.open_module(target))
             row_layout.addWidget(button)
             self.alerts_layout.addWidget(row)
+        self.alerts_layout.addWidget(self.alerts_details)
 
     def open_system_information(self):
         if command_exists("kinfocenter"):
             subprocess.Popen(["kinfocenter"])
         else:
-            self.parent_window.open_module("control")
+            QMessageBox.information(self, "System Information", "KDE Info Centre is not installed.")
 
     def show_telemetry_status(self):
         QMessageBox.information(self, "Telemetry Status", f"Source: {TELEMETRY_URL}\nFallback: {STATE_FILE}")
@@ -689,18 +1116,25 @@ class DashboardPage(QWidget):
     def issue_list(self, data, system):
         issues = []
         if system.get("failed", 0) > 0:
-            issues.append((f"WARN  {system.get('failed')} failed service(s) detected.", "control", "REVIEW"))
+            issues.append(("WARNING", f"{system.get('failed')} failed service(s) detected.", "dashboard", "REVIEW"))
         if system.get("updates"):
-            issues.append((f"WARN  {system.get('updates')} system update(s) available.", "software", "REVIEW UPDATES"))
+            issues.append(("WARNING", f"{system.get('updates')} system update(s) available.", "software", "REVIEW UPDATES"))
         if float(data.get("cpu_temp") or 0) >= 80:
-            issues.append((f"WARN  CPU temperature is high at {data.get('cpu_temp')}°C.", "control", "DIAGNOSTICS"))
+            issues.append(("CRITICAL", f"CPU temperature is high at {data.get('cpu_temp')}°C.", "dashboard", "REVIEW"))
         if float(data.get("gpu_temp") or 0) >= 80:
-            issues.append((f"WARN  GPU temperature is high at {data.get('gpu_temp')}°C.", "control", "DIAGNOSTICS"))
+            issues.append(("CRITICAL", f"GPU temperature is high at {data.get('gpu_temp')}°C.", "dashboard", "REVIEW"))
         if float(data.get("storage_percent") or 0) >= 85:
-            issues.append((f"WARN  Root storage is {data.get('storage_percent')}% full.", "software", "REVIEW STORAGE"))
+            issues.append(("WARNING", f"Root storage is {data.get('storage_percent')}% full.", "software", "REVIEW STORAGE"))
+        if system.get("firewall") != "Enabled":
+            issues.append(("WARNING", "No active firewall service was detected.", "dashboard", "VIEW DETAILS"))
+        if system.get("security", {}).get("secure_boot") == "Disabled":
+            issues.append(("ADVISORY", "Secure Boot is disabled.", "dashboard", "VIEW DETAILS"))
+        if system.get("gpu_state", "").startswith("awake") and float(data.get("gpu_usage") or 0) < 2:
+            issues.append(("ADVISORY", f"NVIDIA GPU is awake while idle ({system.get('gpu_power', 'power unknown')}).", "dashboard", "VIEW DETAILS"))
         if not data:
-            issues.append(("WARN  Telemetry is unavailable; dashboard readings may be stale.", "command_apps", "TELEMETRY"))
-        return issues
+            issues.append(("WARNING", "Telemetry is unavailable; dashboard readings may be stale.", "command_apps", "TELEMETRY"))
+        order = {"CRITICAL": 0, "WARNING": 1, "ADVISORY": 2, "INFO": 3}
+        return sorted(issues, key=lambda item: order[item[0]])
 
 
 class ControlPage(QWidget):
@@ -1300,6 +1734,7 @@ class SoftwarePage(QWidget):
         self.cachyos_search = QLineEdit()
         self.cachyos_search.setPlaceholderText("Filter CommandOS popular applications")
         self.cachyos_list = QListWidget()
+        self.cachyos_list.setMinimumHeight(520)
         self.cachyos_category.currentTextChanged.connect(self.render_cachyos_catalog)
         self.cachyos_search.textChanged.connect(self.render_cachyos_catalog)
         self.cachyos_list.itemChanged.connect(self.cachyos_item_changed)
@@ -1335,7 +1770,11 @@ class SoftwarePage(QWidget):
         self.software_poll.start(100)
 
     def overview_panel(self):
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 8, 4, 4)
         frame, layout = self.panel("Software State")
+        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout.addWidget(self.overview_status)
         buttons = QHBoxLayout()
         for label, handler in [("REVIEW UPDATES", self.show_update_review), ("UPDATE ALL", self.update_system), ("RUN HEALTH CHECK", self.refresh)]:
@@ -1353,7 +1792,9 @@ class SoftwarePage(QWidget):
         snapshot.clicked.connect(self.create_snapshot)
         protection_layout.addWidget(snapshot)
         layout.addWidget(protection)
-        return frame
+        page_layout.addWidget(frame, 0, Qt.AlignTop)
+        page_layout.addStretch(1)
+        return page
 
     def updates_page(self):
         page = QWidget()
@@ -1373,12 +1814,17 @@ class SoftwarePage(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         health, health_layout = self.panel("Software Health")
+        health.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         health_layout.addWidget(self.health_status)
         layout.addWidget(health)
         sources, sources_layout = self.panel("Package Sources")
+        sources.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         sources_layout.addWidget(self.sources_status)
         layout.addWidget(sources)
-        layout.addWidget(self.maintenance_panel())
+        maintenance = self.maintenance_panel()
+        maintenance.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout.addWidget(maintenance)
+        layout.addStretch(1)
         return page
 
     def history_page(self):
@@ -1457,9 +1903,6 @@ class SoftwarePage(QWidget):
         filters.addWidget(self.cachyos_search, 1)
         curated_layout.addLayout(filters)
         curated_layout.addWidget(self.cachyos_list)
-        install_curated = QPushButton("INSTALL CHECKED PACKAGES")
-        install_curated.clicked.connect(self.install_cachyos_packages)
-        curated_layout.addWidget(install_curated)
         layout.addWidget(curated)
         self.load_package_metadata()
         self.load_cachyos_catalog()
@@ -1486,7 +1929,11 @@ class SoftwarePage(QWidget):
         return frame
 
     def kernel_panel(self):
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 8, 4, 4)
         frame, layout = self.panel("Kernel Manager")
+        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         body = QLabel("Manage installed kernels through chwd-kernel. Install/remove actions open in a terminal and require confirmation.")
         body.setWordWrap(True)
         body.setObjectName("muted")
@@ -1502,6 +1949,7 @@ class SoftwarePage(QWidget):
         grid.addWidget(installed_label, 0, 1)
         grid.addWidget(self.available_kernels, 1, 0)
         grid.addWidget(self.installed_kernels, 1, 1)
+        self.installed_kernels.setMaximumHeight(170)
         layout.addLayout(grid)
 
         row = QHBoxLayout()
@@ -1517,7 +1965,9 @@ class SoftwarePage(QWidget):
             row.addWidget(button)
         row.addStretch()
         layout.addLayout(row)
-        return frame
+        page_layout.addWidget(frame, 0, Qt.AlignTop)
+        page_layout.addStretch(1)
+        return page
 
     def maintenance_panel(self):
         frame, layout = self.panel("Maintenance")
@@ -1612,6 +2062,7 @@ class SoftwarePage(QWidget):
             self.update_list.addItem(f"{record['name'].upper()}  ·  {record['impact']} IMPACT  ·  {record['source']}\n{record['current']} → {record['new']}\n{record['reason']}")
         for row in state["flatpak"]:
             self.update_list.addItem(f"FLATPAK  ·  LOW IMPACT\n{row}")
+        self.render_cachyos_catalog()
         self.render_history()
         self.refresh_tools_status()
 
@@ -1659,22 +2110,10 @@ class SoftwarePage(QWidget):
             self.cachyos_pi_status.setText("CATALOGUE UNAVAILABLE  ·  CommandOS package catalogue data was not found")
 
     def load_cachyos_catalog(self):
-        try:
-            lines = CACHYOS_PACKAGE_CATALOG.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            lines = []
-        catalog = {}
-        category = ""
-        for raw_line in lines:
-            line = raw_line.strip()
-            if line.startswith("- name:"):
-                category = line.split(":", 1)[1].strip().strip('"\'')
-                catalog.setdefault(category, [])
-            elif category and line.startswith("- "):
-                packages = line[2:].strip().split()
-                if packages and all(re.match(r"^[A-Za-z0-9@._+:-]+$", package) for package in packages):
-                    catalog[category].append(packages)
-        self.cachyos_catalog = {name: packages for name, packages in catalog.items() if packages}
+        self.cachyos_catalog = {
+            category: [entry.split(" + ") for entry in entries]
+            for category, entries in COMMANDOS_CURATED_CATALOG.items()
+        }
         self.cachyos_category.blockSignals(True)
         self.cachyos_category.clear()
         self.cachyos_category.addItem("All categories")
@@ -1720,17 +2159,64 @@ class SoftwarePage(QWidget):
                 if needle and needle not in category.lower() and needle not in bundle.lower():
                     continue
                 state = "INSTALLED" if all(package in installed for package in packages) else "AVAILABLE"
+                installed_count = sum(package in installed for package in packages)
+                if installed_count and installed_count < len(packages):
+                    state = f"PARTIAL · {installed_count}/{len(packages)}"
                 descriptions = [self.package_metadata[package]["description"] for package in packages if package in self.package_metadata]
-                description = descriptions[0] if descriptions else f"CommandOS curated {category.lower()} application."
-                bundle_note = f"Package bundle: {bundle}\n" if len(packages) > 1 else ""
-                item = QListWidgetItem(
-                    f"{packages[0]}  ·  {category}  ·  {state}\n"
-                    f"{description}\n{bundle_note}"
-                )
+                description = descriptions[0] if descriptions else CURATED_CATEGORY_DESCRIPTIONS.get(category, "CommandOS curated application.")
+                item = QListWidgetItem()
                 item.setData(Qt.UserRole, packages)
-                item.setCheckState(Qt.Checked if bundle in self.cachyos_checked else Qt.Unchecked)
                 self.cachyos_list.addItem(item)
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(10, 8, 10, 8)
+                copy = QVBoxLayout()
+                name = QLabel(packages[0])
+                name.setObjectName("panelTitle")
+                detail = QLabel(
+                    f"{description}\n"
+                    f"Packages: {bundle}\n"
+                    f"Installation state: {state}"
+                )
+                detail.setObjectName("muted")
+                detail.setWordWrap(True)
+                copy.addWidget(name)
+                copy.addWidget(detail)
+                install = QPushButton("INSTALLED" if state == "INSTALLED" else "INSTALL")
+                install.setEnabled(state != "INSTALLED")
+                install.setObjectName("primaryButton" if state != "INSTALLED" else "")
+                install.setMinimumWidth(110)
+                install.clicked.connect(lambda checked=False, selected=list(packages): self.install_curated_bundle(selected))
+                row_layout.addLayout(copy, 1)
+                row_layout.addWidget(install)
+                item.setSizeHint(row.sizeHint())
+                self.cachyos_list.setItemWidget(item, row)
         self.cachyos_list.blockSignals(False)
+
+    def install_curated_bundle(self, packages):
+        missing = []
+        installed_output = run_text(["pacman", "-Qq"], 8)[0] if command_exists("pacman") else ""
+        installed = set(installed_output.splitlines())
+        for package in packages:
+            if package not in installed:
+                missing.append(package)
+        if not missing:
+            self.result.setPlainText("Every package in this curated entry is already installed.")
+            self.render_cachyos_catalog()
+            return
+        quoted = " ".join(shlex.quote(package) for package in missing)
+        if command_exists("yay"):
+            command = f"yay -S --needed {quoted}"
+        elif command_exists("paru"):
+            command = f"paru -S --needed {quoted}"
+        else:
+            command = f"sudo pacman -S --needed {quoted}"
+        review = "\n".join(f"• {package}" for package in missing)
+        if not confirm(self, "Install Curated Application", f"Install this CommandOS curated entry?\n\n{review}\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command(f"Install {packages[0]}", command):
+            self.record_transaction(f"Curated installation: {packages[0]}", command)
+            self.parent_window.add_history(f"Curated install started: {' '.join(missing)}", category="UPDATE")
 
     def cachyos_item_changed(self, item):
         bundle = " ".join(item.data(Qt.UserRole) or [])
@@ -2087,6 +2573,9 @@ class ToolLibraryPage(QWidget):
         self.tool_state = self.load_tool_state()
         self.inventory_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tool-inventory")
         self.inventory_future = None
+        self.inventory_signature = None
+        self.inventory_refresh_pending = False
+        self.inventory_initialized = False
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tools, capabilities and tasks — e.g. inspect image metadata")
         self.search.textChanged.connect(self.render_tools)
@@ -2112,7 +2601,23 @@ class ToolLibraryPage(QWidget):
         self.favorite_button.clicked.connect(self.toggle_favorite)
         self.auto_refresh = QTimer(self)
         self.auto_refresh.timeout.connect(self.refresh_if_changed)
-        self.auto_refresh.start(60000)
+        self.auto_refresh.start(15000)
+        self.inventory_watcher = QFileSystemWatcher(self)
+        watch_paths = [
+            CURATED_TOOLS_FILE,
+            Path("/var/lib/pacman/local"),
+            Path("/usr/share/applications"),
+            Path.home() / ".local/share/applications",
+            Path("/var/lib/flatpak/exports/share/applications"),
+            Path.home() / ".local/share/flatpak/exports/share/applications",
+        ]
+        watch_paths.extend(Path(path) for path in os.environ.get("PATH", "").split(os.pathsep) if path)
+        self.inventory_watch_paths = list(dict.fromkeys(watch_paths))
+        existing_watch_paths = [path for path in self.inventory_watch_paths if path.exists()]
+        if existing_watch_paths:
+            self.inventory_watcher.addPaths([str(path) for path in existing_watch_paths])
+        self.inventory_watcher.fileChanged.connect(lambda _: self.refresh_if_changed())
+        self.inventory_watcher.directoryChanged.connect(lambda _: self.refresh_if_changed())
         self.inventory_poll = QTimer(self)
         self.inventory_poll.timeout.connect(self.finish_inventory_refresh)
         self.inventory_poll.start(100)
@@ -2190,23 +2695,59 @@ class ToolLibraryPage(QWidget):
         if self.inventory_future is None:
             self.status.setText(f"{len(self.metadata)} curated tools ready · inventory scanning in background…")
             self.inventory_future = self.inventory_executor.submit(self.build_library)
+        else:
+            self.inventory_refresh_pending = True
 
     def finish_inventory_refresh(self):
         if self.inventory_future is None or not self.inventory_future.done():
             return
         future = self.inventory_future
         self.inventory_future = None
+        previous_keys = {tool.get("key") for tool in self.tools}
         try:
             self.tools = future.result()
         except Exception as error:
             self.result.setPlainText(f"Inventory refresh failed: {error}")
             return
+        self.inventory_signature = self.inventory_change_signature()
         self.populate_categories()
         self.render_tools()
-        self.result.setPlainText("Curated Library merged with the live system inventory.")
+        added = [tool for tool in self.tools if tool.get("key") not in previous_keys]
+        if self.inventory_initialized and previous_keys and added:
+            names = ", ".join(tool.get("name", "Unknown") for tool in added[:5])
+            suffix = f" and {len(added) - 5} more" if len(added) > 5 else ""
+            message = f"Tool Library detected {len(added)} new item(s): {names}{suffix}"
+            self.result.setPlainText(message)
+            self.parent_window.add_history(message, category="SYSTEM")
+        else:
+            self.result.setPlainText("Tool Library synchronized with the live system inventory.")
+        self.inventory_initialized = True
+        if self.inventory_refresh_pending:
+            self.inventory_refresh_pending = False
+            if self.inventory_change_signature() != self.inventory_signature:
+                self.refresh_if_changed()
 
     def refresh_if_changed(self):
-        self.refresh()
+        signature = self.inventory_change_signature()
+        if self.inventory_signature is None or signature != self.inventory_signature:
+            watched = set(self.inventory_watcher.files()) | set(self.inventory_watcher.directories())
+            newly_available = [str(path) for path in self.inventory_watch_paths if path.exists() and str(path) not in watched]
+            if newly_available:
+                self.inventory_watcher.addPaths(newly_available)
+            metadata, collections = self.load_metadata()
+            self.metadata = metadata
+            self.collections = collections
+            self.refresh()
+
+    def inventory_change_signature(self):
+        signature = []
+        for path in self.inventory_watch_paths:
+            try:
+                stat = path.stat()
+                signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((str(path), 0, 0))
+        return tuple(signature)
 
     def live_command_lines(self, command, timeout=12):
         output, _, code = run_text(command, timeout)
@@ -3385,6 +3926,13 @@ class CommandCodePage(QWidget):
         self.load_codex_usage()
         self.chat_session_path = None
         self.start_chat_session()
+        self.agent_task = None
+        self.agent_task_path = None
+        self.agent_paused = False
+        self.agent_phase = "idle"
+        self.pending_execution_prompt = ""
+        self.pending_execution_title = ""
+        self.pending_execution_images = []
 
         self.model = QFileSystemModel()
         self.model.setRootPath(str(self.workspace))
@@ -3439,9 +3987,12 @@ class CommandCodePage(QWidget):
         self.agent_provider.setCurrentIndex(max(0, self.agent_provider.findData(configured_provider)))
         self.agent_provider.currentIndexChanged.connect(self.agent_provider_changed)
         self.permission_preset = QComboBox()
+        self.permission_preset.addItem("Observe · read/search only", "observe")
         self.permission_preset.addItem("Safe · read/propose", "safe")
-        self.permission_preset.addItem("Development · reviewed writes", "development")
-        self.permission_preset.addItem("Trusted Workspace", "trusted")
+        self.permission_preset.addItem("Develop · edit + build/test", "develop")
+        self.permission_preset.addItem("Elevated · confirmation required", "elevated")
+        self.permission_preset.addItem("Autonomous · approved plan", "autonomous")
+        self.permission_preset.setCurrentIndex(0)
         self.context_scope = QComboBox()
         self.context_scope.addItem("Context: current file", "file")
         self.context_scope.addItem("Context: file + Git diff", "git")
@@ -3483,6 +4034,7 @@ class CommandCodePage(QWidget):
 
         self.open_workspace(Path("/home/eugene/Desktop/Code"))
         self.append_chat("system", "Command Terminal Agent Hub ready. Choose a provider, mode, and permission preset.")
+        self.load_latest_agent_task()
 
     def toolbar(self):
         row = QHBoxLayout()
@@ -3541,8 +4093,11 @@ class CommandCodePage(QWidget):
 
         tabs = QTabWidget()
         tabs.addTab(self.codex_chat_tab(), "Chat")
+        tabs.addTab(self.agent_plan_tab(), "Plan")
+        tabs.addTab(self.agent_changes_tab(), "Changes")
         tabs.addTab(self.chat_history_tab(), "History")
         tabs.addTab(self.codex_usage_tab(), "Usage")
+        self.agent_hub_tabs = tabs
         layout.addWidget(tabs)
         self.update_codex_usage_display()
         return frame
@@ -3560,8 +4115,11 @@ class CommandCodePage(QWidget):
         top.addWidget(mode_label, 0, 2)
         top.addWidget(self.codex_mode, 0, 3)
         top.addWidget(self.permission_preset, 1, 0, 1, 2)
+        profile_rules = QPushButton("Profile Rules")
+        profile_rules.clicked.connect(self.show_permission_profile)
+        top.addWidget(profile_rules, 2, 0, 1, 2)
         top.addWidget(self.context_scope, 1, 2, 1, 2)
-        top.addWidget(self.codex_status, 2, 0, 1, 4)
+        top.addWidget(self.codex_status, 2, 2, 1, 2)
         layout.addLayout(top)
 
         auth = QHBoxLayout()
@@ -3609,6 +4167,80 @@ class CommandCodePage(QWidget):
         layout.addWidget(prompt_frame)
         return tab
 
+    def agent_plan_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.task_title = QLabel("TASK: No active task")
+        self.task_title.setObjectName("healthHeader")
+        self.task_status = QLabel("STATUS: IDLE")
+        self.task_status.setObjectName("controlState")
+        self.task_elapsed = QLabel("Elapsed: --")
+        self.task_elapsed.setObjectName("muted")
+        self.task_estimate = QLabel("ESTIMATED IMPACT\nNo plan has been generated.")
+        self.task_estimate.setObjectName("controlState")
+        self.task_estimate.setWordWrap(True)
+        self.task_steps = QListWidget()
+        self.task_commands = QListWidget()
+        steps_label = QLabel("PLAN")
+        steps_label.setObjectName("panelTitle")
+        commands_label = QLabel("COMMANDS")
+        commands_label.setObjectName("panelTitle")
+        controls = QHBoxLayout()
+        self.task_edit_plan = QPushButton("EDIT PLAN")
+        self.task_edit_plan.clicked.connect(self.edit_agent_plan)
+        self.task_approve = QPushButton("APPROVE & RUN")
+        self.task_approve.setObjectName("primaryButton")
+        self.task_approve.clicked.connect(self.approve_agent_plan)
+        self.task_pause = QPushButton("PAUSE")
+        self.task_pause.clicked.connect(self.toggle_agent_pause)
+        stop = QPushButton("STOP")
+        stop.clicked.connect(self.stop_codex)
+        diff = QPushButton("VIEW DIFF")
+        diff.clicked.connect(self.show_agent_diff)
+        controls.addWidget(self.task_edit_plan)
+        controls.addWidget(self.task_approve)
+        controls.addWidget(self.task_pause)
+        controls.addWidget(stop)
+        controls.addWidget(diff)
+        controls.addStretch()
+        layout.addWidget(self.task_title)
+        layout.addWidget(self.task_status)
+        layout.addWidget(self.task_elapsed)
+        layout.addWidget(self.task_estimate)
+        layout.addWidget(steps_label)
+        layout.addWidget(self.task_steps, 1)
+        layout.addWidget(commands_label)
+        layout.addWidget(self.task_commands, 1)
+        layout.addLayout(controls)
+        self.task_clock = QTimer(self)
+        self.task_clock.timeout.connect(self.refresh_agent_task_ui)
+        self.task_clock.start(1000)
+        self.refresh_agent_task_ui()
+        return tab
+
+    def agent_changes_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.agent_changes_summary = QLabel("No agent changes recorded.")
+        self.agent_changes_summary.setObjectName("controlState")
+        self.agent_files = QListWidget()
+        self.agent_log = QPlainTextEdit()
+        self.agent_log.setReadOnly(True)
+        self.agent_log.setObjectName("textPanel")
+        files_label = QLabel("FILES")
+        files_label.setObjectName("panelTitle")
+        log_label = QLabel("AUDITABLE AGENT LOG")
+        log_label.setObjectName("panelTitle")
+        review = QPushButton("REVIEW DIFF")
+        review.clicked.connect(self.show_agent_diff)
+        layout.addWidget(self.agent_changes_summary)
+        layout.addWidget(files_label)
+        layout.addWidget(self.agent_files, 1)
+        layout.addWidget(log_label)
+        layout.addWidget(self.agent_log, 1)
+        layout.addWidget(review)
+        return tab
+
     def chat_history_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -3643,7 +4275,8 @@ class CommandCodePage(QWidget):
         return tab
 
     def start_chat_session(self):
-        CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        CHAT_LOG_DIR.chmod(0o700)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.chat_session_path = CHAT_LOG_DIR / f"chat-{stamp}-{os.getpid()}.jsonl"
 
@@ -3659,6 +4292,7 @@ class CommandCodePage(QWidget):
         try:
             with self.chat_session_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self.chat_session_path.chmod(0o600)
         except OSError as error:
             self.status.setText(f"Unable to save chat log: {error}")
 
@@ -4248,16 +4882,44 @@ class CommandCodePage(QWidget):
         output, error, code = run_text(["git", "-C", str(self.workspace), "status", "--short", "--branch"], 5)
         self.output.setPlainText(output or error or ("Clean working tree" if code == 0 else "Not a Git workspace"))
 
-    def create_checkpoint(self):
+    def create_checkpoint(self, silent=False):
         patch, error, code = run_text(["git", "-C", str(self.workspace), "diff", "--binary", "HEAD"], 8)
         if code != 0:
-            self.output.appendPlainText(error or "Unable to create Git patch checkpoint."); return
-        checkpoint_dir = CONFIG_DIR / "checkpoints"; checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        path = checkpoint_dir / f"workspace-{time.strftime('%Y%m%d-%H%M%S')}.patch"
-        path.write_text(patch, encoding="utf-8")
-        untracked = run_text(["git", "-C", str(self.workspace), "ls-files", "--others", "--exclude-standard"], 5)[0]
-        note = f"\nUntracked files are listed but not copied:\n{untracked}" if untracked else ""
-        self.output.appendPlainText(f"Tracked-file checkpoint saved without changing the working tree:\n{path}{note}")
+            if not silent: self.output.appendPlainText(error or "Unable to create Git patch checkpoint.")
+            return ""
+        checkpoint_root = CONFIG_DIR / "checkpoints"
+        checkpoint_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = checkpoint_root / f"workspace-{time.strftime('%Y%m%d-%H%M%S')}"
+        path.mkdir(mode=0o700)
+        patch_path = path / "changes.patch"
+        patch_path.write_text(patch, encoding="utf-8")
+        patch_path.chmod(0o600)
+        untracked_output = run_text(["git", "-C", str(self.workspace), "ls-files", "--others", "--exclude-standard", "-z"], 5)[0]
+        copied, skipped = [], []
+        for relative in filter(None, untracked_output.split("\0")):
+            source = (self.workspace / relative).resolve()
+            try:
+                source.relative_to(self.workspace.resolve())
+                if source.is_symlink() or not source.is_file() or source.stat().st_size > 50 * 1024 * 1024:
+                    skipped.append(relative)
+                    continue
+                destination = path / "untracked" / relative
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copy2(source, destination)
+                destination.chmod(0o600)
+                copied.append(relative)
+            except OSError:
+                skipped.append(relative)
+        manifest_path = path / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "workspace": str(self.workspace), "tracked_patch": "changes.patch",
+            "untracked_copied": copied, "untracked_skipped": skipped,
+        }, indent=2), encoding="utf-8")
+        manifest_path.chmod(0o600)
+        if not silent:
+            note = f"\nSkipped {len(skipped)} unsafe or oversized untracked file(s)." if skipped else ""
+            self.output.appendPlainText(f"Complete workspace checkpoint saved without changing the working tree:\n{path}\nCopied {len(copied)} untracked file(s).{note}")
+        return str(path)
 
     def codex_command(self):
         return ensure_codex_on_path()
@@ -4475,11 +5137,26 @@ class CommandCodePage(QWidget):
                 "You are in Debug mode. Diagnose the reported problem using supplied code and output. Propose focused checks and fixes; do not modify files unless explicitly approved."
             ),
         }
-        permission = self.permission_preset.currentData() or "safe"
-        permission_text = {"safe":"FILES: read supplied context and propose only. TERMINAL: disabled. NETWORK: provider request only. GIT: no writes.",
-                           "development":"FILES: workspace changes require review. TERMINAL: project commands require approval. SUDO: prohibited. GIT PUSH: prohibited.",
-                           "trusted":"FILES: workspace only. TERMINAL: reviewed commands. NETWORK: allowed when provider supports it. SUDO and privileged system changes: prohibited."}[permission]
+        permission = self.permission_preset.currentData() or "observe"
+        permission_text = self.permission_profile_text(permission)
         return f"{instructions.get(mode, instructions['agent'])}\n\nCommand Terminal permission preset: {permission.upper()}\n{permission_text}\n\nUser request:\n{user_prompt}"
+
+    def permission_profile_text(self, permission=None):
+        permission = permission or self.permission_preset.currentData() or "observe"
+        return {
+            "observe": "FILES: read/search only. EDITS: prohibited. TERMINAL: inspection only. NETWORK: provider-owned request only. GIT: no writes.",
+            "safe": "FILES: read/search and proposed changes only. EDITS: prohibited by the read-only sandbox. TERMINAL: inspection only. NETWORK: prohibited. GIT: no writes.",
+            "develop": "FILES: workspace edits allowed. TERMINAL: project build/test/lint commands allowed. NETWORK: dependency access only when requested. SUDO and Git remote writes: prohibited.",
+            "elevated": "FILES: workspace edits allowed. SYSTEM/PACKAGE actions require an explicit user confirmation outside the agent. SUDO is never silently authorized. Git remote writes require separate approval.",
+            "autonomous": "Execute the approved task plan within this workspace. Build/test commands are allowed. Stop at boundary changes, privilege prompts, destructive actions, secrets, or Git remote writes.",
+        }.get(permission, "Unknown permission profile.")
+
+    def show_permission_profile(self):
+        QMessageBox.information(
+            self,
+            f"Permission Profile · {self.permission_preset.currentText()}",
+            self.permission_profile_text(),
+        )
 
     def append_chat(self, role, message):
         role_labels = {
@@ -4602,7 +5279,241 @@ class CommandCodePage(QWidget):
         except Exception as error: message = f"Provider request failed: {error}"
         self.append_chat("assistant", message); self.codex_status.setText("Ready")
 
-    def run_codex(self, prompt, display_question=None):
+    def start_agent_task(self, title):
+        AGENT_TASK_DIR.mkdir(parents=True, exist_ok=True)
+        task_id = f"task-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        self.agent_task_path = AGENT_TASK_DIR / f"{task_id}.json"
+        self.agent_task = {
+            "id": task_id,
+            "title": title or "Agent request",
+            "status": "PLANNING",
+            "mode": self.selected_codex_mode(),
+            "permission_profile": self.permission_preset.currentData() or "safe",
+            "workspace": str(self.workspace),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "started_epoch": time.time(),
+            "finished_at": "",
+            "steps": [{"title": "Generate a read-only implementation plan", "status": "running"}],
+            "commands": [], "files": [], "log": [], "usage": {},
+        }
+        self.agent_paused = False
+        if hasattr(self, "task_pause"):
+            self.task_pause.setText("PAUSE")
+        self.log_agent_activity("TASK", "Agent task started", title)
+        self.refresh_agent_files()
+        self.save_agent_task()
+        self.refresh_agent_task_ui()
+
+    def save_agent_task(self):
+        if not self.agent_task or not self.agent_task_path:
+            return
+        try:
+            self.agent_task_path.write_text(json.dumps(self.agent_task, indent=2), encoding="utf-8")
+            self.agent_task_path.chmod(0o600)
+        except OSError as error:
+            self.status.setText(f"Unable to save agent task: {error}")
+
+    def load_latest_agent_task(self):
+        AGENT_TASK_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(AGENT_TASK_DIR.glob("task-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not files:
+            return
+        try:
+            task = json.loads(files[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if task.get("status") in ("EXECUTING", "PAUSED"):
+            task["status"] = "INTERRUPTED"
+            task["finished_epoch"] = time.time()
+            task["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            task.setdefault("log", []).append({
+                "timestamp": time.strftime("%H:%M:%S"), "kind": "TASK",
+                "title": "Task interrupted by application restart", "detail": "", "status": "failed",
+            })
+        self.agent_task = task
+        self.agent_task_path = files[0]
+        if task.get("status") == "WAITING FOR APPROVAL":
+            self.pending_execution_prompt = task.get("execution_prompt", "")
+            self.pending_execution_title = task.get("execution_title", task.get("title", ""))
+            self.pending_execution_images = [Path(path) for path in task.get("execution_images", []) if Path(path).is_file()]
+        self.save_agent_task()
+        self.refresh_agent_task_ui()
+
+    def log_agent_activity(self, kind, title, detail="", status="info"):
+        if not self.agent_task:
+            return
+        self.agent_task["log"].append({
+            "timestamp": time.strftime("%H:%M:%S"), "kind": kind,
+            "title": title, "detail": detail, "status": status,
+        })
+        self.agent_task["log"] = self.agent_task["log"][-500:]
+        self.save_agent_task()
+        self.refresh_agent_task_ui()
+
+    def set_agent_step(self, index, status):
+        if self.agent_task and 0 <= index < len(self.agent_task["steps"]):
+            self.agent_task["steps"][index]["status"] = status
+            self.save_agent_task()
+            self.refresh_agent_task_ui()
+
+    def refresh_agent_files(self):
+        if not self.agent_task:
+            return
+        output = run_text(["git", "-C", str(self.workspace), "status", "--short"], 5)[0]
+        files = []
+        for line in output.splitlines():
+            if len(line) >= 4:
+                files.append({"status": line[:2].strip() or "M", "path": line[3:].strip()})
+        self.agent_task["files"] = files
+        self.save_agent_task()
+
+    def refresh_agent_task_ui(self):
+        if not hasattr(self, "task_title"):
+            return
+        task = self.agent_task
+        if not task:
+            self.task_title.setText("TASK: No active task")
+            self.task_status.setText("STATUS: IDLE")
+            self.task_elapsed.setText("Elapsed: --")
+            self.task_steps.clear(); self.task_commands.clear()
+            self.task_edit_plan.setVisible(False)
+            self.task_approve.setVisible(False)
+            self.task_pause.setVisible(False)
+            return
+        self.task_title.setText(f"TASK: {task['title']}")
+        self.task_status.setText(f"STATUS: {task['status']}  ·  {task['mode'].upper()}  ·  {task['permission_profile'].upper()}")
+        end = task.get("finished_epoch") or time.time()
+        elapsed = max(0, int(end - task.get("started_epoch", end)))
+        self.task_elapsed.setText(f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}")
+        impact = task.get("estimated_impact", {})
+        self.task_estimate.setText(
+            "ESTIMATED IMPACT\n"
+            f"Files to inspect        {len(impact.get('files_to_inspect', [])) if isinstance(impact.get('files_to_inspect', []), list) else impact.get('files_to_inspect', 'Unknown')}\n"
+            f"Files likely modified   {len(impact.get('likely_modified_files', [])) if isinstance(impact.get('likely_modified_files', []), list) else impact.get('likely_modified_files', 'Unknown')}\n"
+            f"Commands required       {len(impact.get('commands', [])) if isinstance(impact.get('commands', []), list) else impact.get('commands', 'Unknown')}\n"
+            f"Privilege required      {'YES' if impact.get('privilege_required') else 'NO'}\n"
+            f"Network required        {'YES' if impact.get('network_required') else 'NO'}\n"
+            f"Risk                     {str(impact.get('risk_level', 'Unknown')).upper()}"
+        )
+        icons = {"completed": "✓", "running": "●", "pending": "○", "failed": "!", "stopped": "■"}
+        self.task_steps.clear()
+        for step in task["steps"]:
+            self.task_steps.addItem(f"{icons.get(step['status'], '○')}  {step['title']}")
+        self.task_commands.clear()
+        for command in task["commands"][-30:]:
+            self.task_commands.addItem(f"{icons.get(command['status'], '○')}  {command['command']}")
+        waiting = task["status"] == "WAITING FOR APPROVAL"
+        running = task["status"] in ("EXECUTING", "PAUSED", "PLANNING")
+        self.task_edit_plan.setVisible(waiting)
+        self.task_approve.setVisible(waiting)
+        self.task_pause.setVisible(running and task["status"] != "PLANNING")
+        if hasattr(self, "agent_files"):
+            self.agent_files.clear()
+            for file in task.get("files", []):
+                self.agent_files.addItem(f"{file['status']:<2}  {file['path']}")
+            self.agent_changes_summary.setText(f"{len(task.get('files', []))} workspace file(s) changed · Task {task['status'].lower()}")
+            self.agent_log.setPlainText("\n\n".join(
+                f"[{entry['timestamp']}] {entry['kind']} · {entry['title']}\n{entry['detail']}".strip()
+                for entry in task.get("log", [])
+            ))
+
+    def parse_agent_plan(self, text):
+        candidate = text.strip()
+        fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", candidate, re.S)
+        if fenced:
+            candidate = fenced.group(1)
+        else:
+            start, end = candidate.find("{"), candidate.rfind("}")
+            if start >= 0 and end > start:
+                candidate = candidate[start:end + 1]
+        try:
+            plan = json.loads(candidate)
+        except (TypeError, ValueError):
+            lines = [re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip() for line in text.splitlines()]
+            steps = [line for line in lines if line and len(line) < 180][:12]
+            plan = {"task": self.pending_execution_title, "steps": steps or ["Execute the requested task", "Run verification", "Review changes"]}
+        raw_steps = plan.get("steps") or plan.get("plan") or []
+        steps = []
+        for entry in raw_steps:
+            if isinstance(entry, dict):
+                title = entry.get("title") or entry.get("text") or entry.get("step")
+            else:
+                title = str(entry)
+            if title:
+                steps.append({"title": str(title), "status": "pending"})
+        return {
+            "task": plan.get("task") or self.pending_execution_title,
+            "steps": steps or [{"title": "Execute the requested task", "status": "pending"}],
+            "files_to_inspect": plan.get("files_to_inspect", []),
+            "likely_modified_files": plan.get("likely_modified_files", []),
+            "commands": plan.get("commands", []),
+            "privilege_required": bool(plan.get("privilege_required", False)),
+            "network_required": bool(plan.get("network_required", False)),
+            "risk_level": plan.get("risk_level", "unknown"),
+        }
+
+    def edit_agent_plan(self):
+        if not self.agent_task or self.agent_task.get("status") != "WAITING FOR APPROVAL":
+            return
+        current = "\n".join(step["title"] for step in self.agent_task.get("steps", []))
+        text, ok = QInputDialog.getMultiLineText(self, "Edit Agent Plan", "One approved step per line:", current)
+        if not ok:
+            return
+        steps = [line.strip() for line in text.splitlines() if line.strip()]
+        if not steps:
+            QMessageBox.information(self, "Agent Plan", "The plan must contain at least one step.")
+            return
+        self.agent_task["steps"] = [{"title": step, "status": "pending"} for step in steps]
+        self.agent_task["approval_status"] = "edited · approval required"
+        self.log_agent_activity("PLAN", "Plan edited by user", f"{len(steps)} approved step(s)")
+
+    def approve_agent_plan(self):
+        if not self.agent_task or self.agent_task.get("status") != "WAITING FOR APPROVAL":
+            return
+        if not self.pending_execution_prompt:
+            QMessageBox.warning(self, "Agent Plan", "The execution prompt is no longer available. Submit the task again to regenerate its plan.")
+            return
+        impact = self.agent_task.get("estimated_impact", {})
+        if impact.get("privilege_required") and not confirm(
+            self, "Approve Elevated Plan",
+            "This plan predicts privileged operations. Approval allows the workspace execution pass, but every system or package action must still be confirmed separately.\n\nApprove this plan?",
+        ):
+            return
+        checkpoint = self.create_checkpoint(silent=True)
+        self.agent_task["checkpoint"] = checkpoint
+        self.agent_task["approval_status"] = "approved"
+        self.agent_task["approved_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        self.agent_task["status"] = "EXECUTING"
+        if checkpoint:
+            self.log_agent_activity("CHECKPOINT", "Pre-task checkpoint created", checkpoint, "completed")
+        self.log_agent_activity("APPROVAL", "Plan approved by user", status="completed")
+        approved_plan = "\n".join(f"{index}. {step['title']}" for index, step in enumerate(self.agent_task["steps"], 1))
+        execution_prompt = self.pending_execution_prompt + f"\n\nAPPROVED TASK PLAN\n{approved_plan}\n\nExecute only within this approved plan. Stop and request approval if files, commands, network access, privileges, or scope materially exceed it."
+        self.run_codex(execution_prompt, self.pending_execution_title, approved_run=True)
+
+    def toggle_agent_pause(self):
+        if not self.codex_process or self.codex_process.state() == QProcess.NotRunning:
+            self.append_chat("system", "No running Codex task to pause.")
+            return
+        pid = int(self.codex_process.processId())
+        try:
+            if self.agent_paused:
+                os.kill(pid, signal.SIGCONT); self.agent_paused = False
+                self.agent_task["status"] = "EXECUTING"; self.task_pause.setText("PAUSE")
+                self.log_agent_activity("CONTROL", "Agent resumed")
+            else:
+                os.kill(pid, signal.SIGSTOP); self.agent_paused = True
+                self.agent_task["status"] = "PAUSED"; self.task_pause.setText("RESUME")
+                self.log_agent_activity("CONTROL", "Agent paused")
+        except (OSError, ProcessLookupError) as error:
+            self.append_chat("system", f"Unable to change agent pause state: {error}")
+
+    def show_agent_diff(self):
+        diff, error, code = run_text(["git", "-C", str(self.workspace), "diff", "--stat"], 8)
+        full = run_text(["git", "-C", str(self.workspace), "diff", "--", "."], 8)[0]
+        self.output.setPlainText((diff + "\n\n" + full[:40000]).strip() or error or "No tracked changes to display.")
+
+    def run_codex(self, prompt, display_question=None, approved_run=False):
         command = self.codex_command()
         if not command:
             self.append_chat("system", "Codex CLI was not found.")
@@ -4612,9 +5523,44 @@ class CommandCodePage(QWidget):
             return
 
         mode_label = self.codex_mode.currentText()
-        self.append_chat("user", f"[{mode_label}] {display_question or prompt.split(chr(10), 1)[0]}")
-        self.append_chat("system", "Thinking...")
-        self.codex_status.setText(f"Running in {mode_label} mode")
+        title = display_question or prompt.split(chr(10), 1)[0]
+        profile = self.permission_preset.currentData() or "observe"
+        needs_plan = not approved_run and self.selected_codex_mode() in ("agent", "edit") and profile in ("safe", "develop", "elevated", "autonomous")
+        if needs_plan:
+            self.start_agent_task(title)
+            self.agent_phase = "planning"
+            self.pending_execution_prompt = prompt
+            self.pending_execution_title = title
+            self.pending_execution_images = list(self.image_attachments())
+            planning_request = (
+                "Create a read-only implementation plan for the task below. Inspect the workspace as needed, but do not edit files or run changing commands. "
+                "Return a single JSON object with exactly these fields: task (string), steps (array of concise strings), files_to_inspect (array of paths), "
+                "likely_modified_files (array of paths), commands (array of anticipated commands), privilege_required (boolean), network_required (boolean), "
+                "risk_level (low, medium, or high). Do not wrap the JSON in commentary.\n\n" + prompt
+            )
+            process_prompt = planning_request
+            sandbox = "read-only"
+            self.append_chat("user", f"[{mode_label}] {title}")
+            self.append_chat("system", "Creating a read-only task plan for approval...")
+            self.codex_status.setText("Planning · read-only")
+        else:
+            process_prompt = prompt
+            sandbox = "read-only" if (profile in ("observe", "safe") or self.selected_codex_mode() in ("ask", "plan", "review", "debug")) else "workspace-write"
+            if approved_run:
+                self.agent_phase = "executing"
+                self.agent_task["status"] = "EXECUTING"
+                self.append_chat("system", "Approved plan is now executing.")
+            else:
+                self.start_agent_task(title)
+                self.agent_phase = "executing"
+                self.agent_task["status"] = "EXECUTING"
+                self.agent_task["steps"] = [
+                    {"title": "Process the request", "status": "running"},
+                    {"title": "Review and report", "status": "pending"},
+                ]
+                self.append_chat("user", f"[{mode_label}] {title}")
+                self.append_chat("system", "Thinking...")
+            self.codex_status.setText(f"Running in {mode_label} mode")
         temp = tempfile.NamedTemporaryFile(prefix="command-centre-codex-", suffix=".txt", delete=False)
         temp.close()
         self.codex_last_message_path = Path(temp.name)
@@ -4632,22 +5578,24 @@ class CommandCodePage(QWidget):
             str(self.workspace),
             "--skip-git-repo-check",
             "--sandbox",
-            "read-only" if (self.permission_preset.currentData() == "safe" or self.selected_codex_mode() in ("ask", "plan", "review", "debug")) else "workspace-write",
+            sandbox,
             "--color",
             "never",
             "--output-last-message",
             str(self.codex_last_message_path),
         ]
-        for image in self.image_attachments():
+        images = self.pending_execution_images if approved_run else self.image_attachments()
+        for image in images:
             args.extend(["--image", str(image)])
-        args.append(prompt)
+        args.append(process_prompt)
         self.codex_process.setArguments(args)
         self.codex_process.readyReadStandardOutput.connect(self.read_codex_stdout)
         self.codex_process.readyReadStandardError.connect(self.read_codex_stderr)
         self.codex_process.finished.connect(self.codex_finished)
         self.codex_process.start()
         self.codex_process.closeWriteChannel()
-        self.clear_attachments()
+        if not needs_plan:
+            self.clear_attachments()
 
     def read_codex_stdout(self):
         data = bytes(self.codex_process.readAllStandardOutput()).decode("utf-8", errors="replace")
@@ -4685,6 +5633,7 @@ class CommandCodePage(QWidget):
         event_type = event.get("type")
 
         if event_type == "turn.started":
+            self.log_agent_activity("AGENT", "Codex turn started")
             return
         if event_type == "turn.completed":
             usage = event.get("usage") or {}
@@ -4693,24 +5642,90 @@ class CommandCodePage(QWidget):
             self.codex_usage["used"] = int(self.codex_usage.get("used", 0)) + run_total
             self.save_codex_usage()
             self.update_codex_usage_display()
+            if self.agent_task:
+                self.agent_task["usage"] = usage
+                self.log_agent_activity("USAGE", "Token usage recorded", json.dumps(usage, sort_keys=True))
             return
         if item_type == "command_execution":
             command = item.get("command", "")
+            if self.agent_phase == "planning":
+                if event_type == "item.started":
+                    self.agent_task["commands"].append({"command": command, "status": "running", "exit_code": None, "phase": "planning"})
+                    self.log_agent_activity("PLAN INSPECTION", "Read-only command started", command, "running")
+                elif event_type == "item.completed":
+                    exit_code = item.get("exit_code")
+                    for record in reversed(self.agent_task["commands"]):
+                        if record["command"] == command and record["status"] == "running":
+                            record["status"] = "completed" if exit_code == 0 else "failed"
+                            record["exit_code"] = exit_code
+                            break
+                    self.log_agent_activity("PLAN INSPECTION", "Read-only command completed", f"{command}\nExit code: {exit_code}", "completed" if exit_code == 0 else "failed")
+                return
             if event_type == "item.started":
+                blocked = re.search(r"(^|[;&|]\s*)(sudo|pkexec|pacman|yay|paru|systemctl)\b|\brm\s+-[^\n]*r[^\n]*f\b|\bgit\s+(push|reset\s+--hard)\b", command, re.I)
+                if blocked:
+                    self.agent_task["status"] = "NEEDS APPROVAL"
+                    self.log_agent_activity("PERMISSION", "Blocked privileged or destructive command", command, "failed")
+                    self.append_chat("system", "Execution stopped: the agent attempted a privileged, destructive, or publishing command. Run that action separately with explicit confirmation.")
+                    if self.codex_process and self.codex_process.state() != QProcess.NotRunning:
+                        self.codex_process.kill()
+                    return
+                if self.agent_task:
+                    verification = bool(re.search(r"\b(pytest|unittest|ruff|mypy|npm\s+test|pnpm\s+test|cargo\s+test|go\s+test|make\s+test)\b", command, re.I))
+                    candidates = [
+                        index for index, step in enumerate(self.agent_task["steps"])
+                        if step["status"] == "pending" and (
+                            not verification or re.search(r"test|verify|lint|check", step["title"], re.I)
+                        )
+                    ]
+                    if candidates and not any(step["status"] == "running" for step in self.agent_task["steps"]):
+                        self.set_agent_step(candidates[0], "running")
+                    self.agent_task["commands"].append({"command": command, "status": "running", "exit_code": None})
+                    self.log_agent_activity("COMMAND", "Command started", command, "running")
                 self.append_chat("tool", f"Running command:\n{command}")
             elif event_type == "item.completed":
                 output = (item.get("aggregated_output") or "").strip()
                 exit_code = item.get("exit_code")
+                if self.agent_task:
+                    for record in reversed(self.agent_task["commands"]):
+                        if record["command"] == command and record["status"] == "running":
+                            record["status"] = "completed" if exit_code == 0 else "failed"
+                            record["exit_code"] = exit_code
+                            break
+                    verification = bool(re.search(r"\b(pytest|unittest|ruff|mypy|npm\s+test|pnpm\s+test|cargo\s+test|go\s+test|make\s+test)\b", command, re.I))
+                    running_steps = [index for index, step in enumerate(self.agent_task["steps"]) if step["status"] == "running"]
+                    if running_steps:
+                        self.set_agent_step(running_steps[0], "completed" if exit_code == 0 else "failed")
+                    self.refresh_agent_files()
+                    self.log_agent_activity("COMMAND", "Command completed", f"{command}\nExit code: {exit_code}", "completed" if exit_code == 0 else "failed")
                 block = f"Executed command:\n{command}\nExit code: {exit_code}"
                 if output:
                     block += f"\nOutput:\n{output}"
                 self.append_chat("tool", block)
+            return
+        if item_type in ("file_change", "file_operation"):
+            path = item.get("path") or item.get("file_path") or "workspace file"
+            self.refresh_agent_files()
+            self.log_agent_activity("FILE", "File operation", str(path))
+            return
+        if item_type in ("todo_list", "plan"):
+            entries = item.get("items") or item.get("steps") or []
+            if self.agent_task and entries:
+                self.agent_task["steps"] = [
+                    {"title": str(entry.get("text") or entry.get("title") or entry), "status": entry.get("status", "pending") if isinstance(entry, dict) else "pending"}
+                    for entry in entries
+                ]
+                self.log_agent_activity("PLAN", "Agent plan updated", f"{len(entries)} step(s)")
             return
         if item_type == "agent_message":
             text = (item.get("text") or "").strip()
             if text:
                 self.codex_answer_seen = True
                 self.codex_current_answer = text
+                if self.agent_phase == "planning":
+                    self.log_agent_activity("PLAN", "Structured plan received", text[:1000])
+                    return
+                self.log_agent_activity("MESSAGE", "Agent response received", text[:1000])
                 self.append_chat("assistant", text)
 
     def codex_finished(self, code, status):
@@ -4720,6 +5735,44 @@ class CommandCodePage(QWidget):
                 final = self.codex_last_message_path.read_text().strip()
             except Exception:
                 final = ""
+        if self.codex_last_message_path:
+            try:
+                self.codex_last_message_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.codex_last_message_path = None
+        if self.agent_phase == "planning" and self.agent_task and self.agent_task.get("status") != "STOPPED":
+            if code != 0:
+                self.agent_task["status"] = "NEEDS ATTENTION"
+                self.set_agent_step(0, "failed")
+                self.log_agent_activity("PLAN", "Planning failed", f"Exit code: {code}", "failed")
+                self.append_chat("system", "The read-only planning pass failed. Review the Plan log and submit the task again.")
+            else:
+                plan = self.parse_agent_plan(final or self.codex_current_answer)
+                self.agent_task["title"] = plan["task"]
+                self.agent_task["steps"] = plan["steps"]
+                self.agent_task["estimated_impact"] = {
+                    "files_to_inspect": plan["files_to_inspect"],
+                    "likely_modified_files": plan["likely_modified_files"],
+                    "commands": plan["commands"],
+                    "privilege_required": plan["privilege_required"],
+                    "network_required": plan["network_required"],
+                    "risk_level": plan["risk_level"],
+                }
+                self.agent_task["status"] = "WAITING FOR APPROVAL"
+                self.agent_task["approval_status"] = "pending"
+                self.agent_task["execution_prompt"] = self.pending_execution_prompt
+                self.agent_task["execution_title"] = self.pending_execution_title
+                self.agent_task["execution_images"] = [str(path) for path in self.pending_execution_images]
+                self.log_agent_activity("PLAN", "Plan ready for approval", f"{len(plan['steps'])} step(s)", "completed")
+                self.append_chat("system", "The task plan is ready. Review it in the Plan tab, edit if needed, then choose APPROVE & RUN.")
+                if hasattr(self, "agent_hub_tabs"):
+                    self.agent_hub_tabs.setCurrentIndex(1)
+            self.codex_status.setText("Waiting for approval" if code == 0 else "Planning failed")
+            self.agent_phase = "waiting"
+            self.save_agent_task()
+            self.refresh_agent_task_ui()
+            return
         if final and not self.codex_answer_seen:
             self.append_chat("assistant", final)
         elif self.codex_log_buffer.strip():
@@ -4728,10 +5781,29 @@ class CommandCodePage(QWidget):
         else:
             self.append_chat("system", "Codex finished without output.")
         self.codex_status.setText("Ready")
+        if self.agent_task:
+            stopped = self.agent_task.get("status") == "STOPPED"
+            self.agent_task["status"] = "STOPPED" if stopped else ("COMPLETE" if code == 0 else "NEEDS ATTENTION")
+            self.agent_task["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self.agent_task["finished_epoch"] = time.time()
+            self.agent_paused = False
+            self.task_pause.setText("PAUSE")
+            if not stopped:
+                for step in self.agent_task["steps"]:
+                    if step["status"] == "running":
+                        step["status"] = "completed" if code == 0 else "failed"
+                self.agent_task["steps"][-1]["status"] = "completed" if code == 0 else "failed"
+            self.refresh_agent_files()
+            self.log_agent_activity("TASK", "Agent task finished", f"Exit code: {code}", "completed" if code == 0 else "failed")
         self.parent_window.add_history("Codex request completed in Command Terminal")
 
     def stop_codex(self):
         if self.codex_process and self.codex_process.state() != QProcess.NotRunning:
+            if self.agent_task:
+                self.agent_task["status"] = "STOPPED"
+                for step in self.agent_task["steps"]:
+                    if step["status"] == "running": step["status"] = "stopped"
+                self.log_agent_activity("CONTROL", "Agent stopped by user", status="stopped")
             self.codex_process.kill()
             self.codex_status.setText("Stopped")
             self.append_chat("system", "Codex stopped.")
@@ -4740,6 +5812,12 @@ class CommandCodePage(QWidget):
 
     def shutdown(self):
         self.stop_codex()
+        if self.codex_last_message_path:
+            try:
+                self.codex_last_message_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.codex_last_message_path = None
         if self.fcc_server_process and self.fcc_server_process.state() != QProcess.NotRunning:
             self.fcc_server_process.terminate()
             if not self.fcc_server_process.waitForFinished(2000): self.fcc_server_process.kill()
@@ -5662,16 +6740,14 @@ class CommandAppsPage(QWidget):
 
     def command_centre_update_card(self):
         frame, layout = self.panel("CC   Command Centre Update")
-        description = QLabel(
-            "Download the complete protected main branch from the official Command Centre GitHub repository and replace the installed application files."
-        )
+        description = QLabel("Direct branch installation is disabled for security. Install reviewed Command Centre packages through the system package manager.")
         description.setWordWrap(True)
         description.setObjectName("muted")
         details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: main\n• System authorization required")
         details.setObjectName("muted")
         details.setWordWrap(True)
         actions = QHBoxLayout()
-        self.command_centre_update = QPushButton("Update from GitHub")
+        self.command_centre_update = QPushButton("Review Package Update")
         self.command_centre_update.setObjectName("primaryButton")
         self.command_centre_update.clicked.connect(self.update_command_centre)
         repository = QPushButton("Open Repository")
@@ -5685,69 +6761,13 @@ class CommandAppsPage(QWidget):
         return frame
 
     def update_command_centre(self):
-        if not command_exists("pkexec"):
-            QMessageBox.warning(self, "Command Centre Update", "pkexec was not found. A graphical system authorization tool is required.")
-            return
-        if not confirm(
-            self,
-            "Update Command Centre",
-            "Download and install every file from the protected GitHub main branch?\n\n"
-            f"{COMMAND_CENTRE_UPDATE_URL}\n\n"
-            "The installed files under /opt/command-centre will be replaced after system authorization.",
-        ):
-            return
-
-        self.command_centre_update.setEnabled(False)
-        self.output.setPlainText("Downloading Command Centre main branch from GitHub…")
-        QApplication.processEvents()
-        try:
-            with tempfile.TemporaryDirectory(prefix="command-centre-update-") as temp_dir:
-                temp_path = Path(temp_dir)
-                archive = temp_path / "command-centre-main.tar.gz"
-                request = urllib.request.Request(COMMAND_CENTRE_UPDATE_URL, headers={"User-Agent": "Command-Centre-Updater"})
-                with urllib.request.urlopen(request, timeout=90) as response, archive.open("wb") as handle:
-                    shutil.copyfileobj(response, handle)
-
-                with tarfile.open(archive, "r:gz") as bundle:
-                    bundle.extractall(temp_path, filter="data")
-                roots = [path for path in temp_path.iterdir() if path.is_dir()]
-                if len(roots) != 1:
-                    raise RuntimeError("The GitHub archive did not contain one project directory.")
-                source = roots[0]
-                required = [
-                    source / "command_centre.py",
-                    source / "command_intel.py",
-                    source / "start.sh",
-                    source / "packaging/arch/command-centre.desktop",
-                    source / "resources/update-command-centre.sh",
-                ]
-                missing = [path.relative_to(source) for path in required if not path.is_file()]
-                if missing:
-                    raise RuntimeError("GitHub archive is incomplete: " + ", ".join(map(str, missing)))
-
-                self.output.setPlainText("Download verified. Waiting for system authorization…")
-                QApplication.processEvents()
-                result = subprocess.run(
-                    ["pkexec", "/bin/bash", str(source / "resources/update-command-centre.sh"), str(source)],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=180,
-                )
-                message = (result.stdout + "\n" + result.stderr).strip()
-                if result.returncode != 0:
-                    raise RuntimeError(message or f"Installer exited with code {result.returncode}.")
-        except Exception as error:
-            self.output.setPlainText(f"Command Centre update failed:\n{error}")
-            QMessageBox.warning(self, "Command Centre Update", f"Update failed.\n\n{error}")
-            self.command_centre_update.setEnabled(True)
-            return
-
-        self.output.setPlainText("Command Centre updated successfully from GitHub main. Restarting…")
-        self.parent_window.add_history("Command Centre updated from GitHub main")
-        QMessageBox.information(self, "Command Centre Update", "Update installed successfully. Command Centre will now restart.")
-        subprocess.Popen(["/usr/bin/command-centre"], start_new_session=True)
-        QApplication.quit()
+        command = "sudo pacman -Syu command-centre"
+        self.output.setPlainText(
+            "Unsigned installation from a mutable GitHub branch is disabled.\n\n"
+            "Use a reviewed, signed Arch package instead:\n"
+            f"{command}\n\nDevelopment checkouts must be updated through an intentional Git review."
+        )
+        QMessageBox.information(self,"Secure Updates","Direct GitHub-to-root updates are disabled. Review and install a signed Command Centre package through Pacman.")
 
     def widget_installed(self):
         widget = Path.home() / ".local/share/plasma/plasmoids/telemetrywidget/metadata.json"
@@ -6030,6 +7050,43 @@ class PlaceholderPage(QWidget):
             layout.addWidget(frame, index // 3, index % 3)
 
 
+class SystemTimelineDialog(QDialog):
+    def __init__(self, event_store, parent=None):
+        super().__init__(parent)
+        self.event_store = event_store
+        self.setWindowTitle("Command OS System Timeline")
+        self.resize(920, 680)
+        self.category = QComboBox()
+        self.category.addItems(["ALL", "SYSTEM", "UPDATE", "POWER", "SECURITY", "NETWORK", "STORAGE", "SNAPSHOT", "DRIVER", "SERVICE", "COMMAND"])
+        self.category.currentTextChanged.connect(self.refresh)
+        self.events = QListWidget()
+        self.events.setWordWrap(True)
+        heading = QLabel("SYSTEM TIMELINE")
+        heading.setObjectName("healthHeader")
+        hint = QLabel("Persistent structured events from Command Centre. Newest events appear first.")
+        hint.setObjectName("muted")
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(hint)
+        layout.addWidget(self.category)
+        layout.addWidget(self.events, 1)
+        layout.addWidget(close)
+        self.refresh()
+
+    def refresh(self):
+        self.events.clear()
+        for row in self.event_store.recent(500, self.category.currentText()):
+            stamp = row["created_utc"].replace("T", " ").replace("Z", " UTC")
+            text = f"{stamp}   {row['severity']:<8}   {row['category']:<10}   {row['title']}"
+            if row["detail"]:
+                text += f"\n{row['detail']}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, row["id"])
+            self.events.addItem(item)
+
+
 class PaletteDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -6076,10 +7133,13 @@ class MainWindow(QMainWindow):
         self.system = {}
         self.pages = {}
         self.nav_buttons = {}
+        self.nav_titles = {}
+        self.sidebar_collapsed = False
         self.update_cache = None
         self.update_cache_time = 0
         self.change_history = []
         self.last_dashboard_state = {}
+        self.event_store = SystemEventStore()
         self.probe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="command-centre-probes")
         self.probe_future = None
 
@@ -6099,6 +7159,7 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.clicked.connect(lambda checked=False, m=module_id: self.open_module(m))
             self.nav_buttons[module_id] = button
+            self.nav_titles[module_id] = (icon, title)
             self.sidebar.addWidget(button)
 
             if module_id == "dashboard":
@@ -6128,10 +7189,17 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(scroll)
 
         self.sidebar.addStretch()
+        self.sidebar_toggle = QPushButton("≪")
+        self.sidebar_toggle.setObjectName("sidebarToggle")
+        self.sidebar_toggle.setToolTip("Collapse sidebar (Ctrl+B)")
+        self.sidebar_toggle.setFixedHeight(40)
+        self.sidebar_toggle.clicked.connect(self.toggle_sidebar)
+        self.sidebar.addWidget(self.sidebar_toggle)
         side = QWidget()
         side.setObjectName("sidebar")
         side.setLayout(self.sidebar)
         side.setFixedWidth(292)
+        self.sidebar_widget = side
         shell.addWidget(side)
         shell.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -6145,6 +7213,11 @@ class MainWindow(QMainWindow):
         palette_action.setShortcut("Ctrl+K")
         palette_action.triggered.connect(self.open_palette)
         self.addAction(palette_action)
+
+        sidebar_action = QAction("Toggle Sidebar", self)
+        sidebar_action.setShortcut("Ctrl+B")
+        sidebar_action.triggered.connect(self.toggle_sidebar)
+        self.addAction(sidebar_action)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_all)
@@ -6174,11 +7247,26 @@ class MainWindow(QMainWindow):
             logo.setText("CC")
             logo.setAlignment(Qt.AlignCenter)
 
-        text = QLabel("COMMAND CENTRE\nOne system, one mission")
-        text.setObjectName("brandText")
+        self.brand_text = QLabel(
+            "<span style='font-size:16px; font-weight:900;'>COMMAND CENTRE</span><br>"
+            "<span style='font-size:11px; font-weight:600; color:#a9bac7;'>One system, one mission</span>"
+        )
+        self.brand_text.setObjectName("brandText")
         layout.addWidget(logo)
-        layout.addWidget(text, 1)
+        layout.addWidget(self.brand_text, 1)
         return frame
+
+    def toggle_sidebar(self):
+        self.sidebar_collapsed = not self.sidebar_collapsed
+        collapsed = self.sidebar_collapsed
+        self.sidebar_widget.setFixedWidth(76 if collapsed else 292)
+        self.brand_text.setVisible(not collapsed)
+        self.sidebar_toggle.setText("≫" if collapsed else "≪")
+        self.sidebar_toggle.setToolTip(("Expand" if collapsed else "Collapse") + " sidebar (Ctrl+B)")
+        for module_id, button in self.nav_buttons.items():
+            icon, title = self.nav_titles[module_id]
+            button.setText(icon if collapsed else f"{icon}  {title}")
+            button.setToolTip(title if collapsed else "")
 
     def open_module(self, module_id):
         geometry = self.geometry()
@@ -6201,10 +7289,51 @@ class MainWindow(QMainWindow):
         dialog = PaletteDialog(self)
         dialog.exec()
 
-    def add_history(self, message):
+    def open_dashboard_drawer(self, title, content):
+        if not hasattr(self, "dashboard_drawer"):
+            self.dashboard_drawer = QDockWidget("System Details", self)
+            self.dashboard_drawer.setObjectName("dashboardDrawer")
+            self.dashboard_drawer.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+            self.dashboard_drawer.setMinimumWidth(430)
+            host = QWidget()
+            layout = QVBoxLayout(host)
+            layout.setContentsMargins(12, 12, 12, 12)
+            self.drawer_title = QLabel("SYSTEM DETAILS")
+            self.drawer_title.setObjectName("healthHeader")
+            self.drawer_content = QPlainTextEdit()
+            self.drawer_content.setReadOnly(True)
+            self.drawer_content.setObjectName("textPanel")
+            refresh = QPushButton("REFRESH FROM DASHBOARD")
+            refresh.clicked.connect(lambda: self.pages["dashboard"].open_detail(getattr(self, "drawer_key", "cpu")))
+            layout.addWidget(self.drawer_title)
+            layout.addWidget(self.drawer_content, 1)
+            layout.addWidget(refresh)
+            self.dashboard_drawer.setWidget(host)
+            self.addDockWidget(Qt.RightDockWidgetArea, self.dashboard_drawer)
+        title_to_key = {
+            "CPU DETAILS": "cpu", "GPU DETAILS": "gpu", "MEMORY DETAILS": "memory",
+            "STORAGE ACTIVITY": "storage", "BATTERY & POWER": "power", "NETWORK DETAILS": "network",
+            "SECURITY REPORT": "security", "DISK & SNAPSHOT DETAILS": "disk",
+            "KERNEL & DRIVER DETAILS": "kernel", "READINESS SCORE": "readiness", "ACTION CENTRE": "alerts",
+        }
+        self.drawer_key = title_to_key.get(title, "cpu")
+        self.dashboard_drawer.setWindowTitle(title.title())
+        self.drawer_title.setText(title)
+        self.drawer_content.setPlainText(content)
+        self.dashboard_drawer.show()
+        self.dashboard_drawer.raise_()
+
+    def add_history(self, message, category="COMMAND", severity="INFO", detail=""):
         stamp = time.strftime("%H:%M")
         self.change_history.insert(0, f"{stamp}  {message}")
         self.change_history = self.change_history[:20]
+        self.event_store.add(
+            category, message, severity=severity, detail=detail,
+            dedupe_key=f"{category}:{message}", dedupe_seconds=300,
+        )
+
+    def show_system_timeline(self):
+        SystemTimelineDialog(self.event_store, self).exec()
 
     def refresh_all(self):
         if self.probe_future is None:
@@ -6212,6 +7341,9 @@ class MainWindow(QMainWindow):
 
     def collect_dashboard_snapshot(self):
         telemetry = read_telemetry()
+        telemetry["_telemetry_available"] = bool(telemetry)
+        telemetry["gpu_devices"] = detected_gpu_devices()
+        gpu_operating = self.gpu_operating_state()
         kernel = run_text(["uname", "-r"])[0] or os.uname().release
         uptime = run_text(["uptime", "-p"])[0] or "--"
         failed = run_text(["systemctl", "--failed", "--no-legend", "--no-pager"], 2)[0]
@@ -6228,8 +7360,21 @@ class MainWindow(QMainWindow):
             "connection": self.connection_state(),
             "firewall": self.firewall_state(),
             "storage_health": self.storage_health(),
+            "filesystem": run_text(["findmnt", "-no", "FSTYPE", "/"], 2)[0] or "Unknown",
+            "snapshot": self.snapshot_state(),
+            "battery": self.battery_state(),
+            "security": self.security_state(),
+            "latency": self.network_latency(),
+            "dns": self.dns_state(),
+            "cpu_governor": self.cpu_governor(),
+            "boot_time": self.boot_time(),
+            "reboot_required": "required" if Path("/var/run/reboot-required").exists() else "not required",
+            "gpu_driver": gpu_operating["driver"],
+            "gpu_power": gpu_operating["power"],
+            "gpu_state": gpu_operating["state"],
             "activity": self.recent_activity(),
         }
+        system["thermal_lines"] = self.thermal_lines(telemetry)
         return telemetry, system
 
     def finish_refresh(self):
@@ -6247,33 +7392,53 @@ class MainWindow(QMainWindow):
         self.telemetry = telemetry
         self.system = system
         self.pages["dashboard"].refresh(self.telemetry, self.system)
-        if self.stack.currentWidget() and self.stack.currentIndex() == 1:
-            self.pages["control"].refresh()
+        control_page = self.pages.get("control")
+        if control_page and self.stack.currentWidget() is control_page:
+            control_page.refresh()
 
     def record_dashboard_transitions(self, telemetry, system):
         current = {
-            "telemetry": bool(telemetry),
+            "telemetry": telemetry.get("_telemetry_available", bool(telemetry)),
             "power": metric_value(telemetry, "power_profile_label", "Unknown"),
             "updates": system.get("updates"),
             "failed": system.get("failed", 0),
             "network": system.get("connection", "Unknown"),
+            "vpn": telemetry.get("vpn_status", "Unknown"),
+            "ssh": system.get("security", {}).get("ssh", "Unknown"),
+            "gpu": system.get("gpu_state", "unknown"),
+            "snapshot": system.get("snapshot", "Unknown"),
         }
         previous = self.last_dashboard_state
+        if not previous:
+            stored = self.event_store.observed_states()
+            previous = self.event_store.decode_observed_states(stored)
         if previous:
-            labels = {
-                "telemetry": lambda value: "Telemetry connected" if value else "Telemetry disconnected",
-                "power": lambda value: f"Power profile changed to {value}",
-                "updates": lambda value: "No updates available" if value == 0 else f"{value} updates detected",
-                "failed": lambda value: "Failed services cleared" if value == 0 else f"{value} failed services detected",
-                "network": lambda value: f"Network changed to {value}",
-            }
-            for key, formatter in labels.items():
-                if current.get(key) != previous.get(key):
-                    self.add_history(formatter(current.get(key)))
-        else:
-            self.add_history("Dashboard monitoring started")
-            if current["telemetry"]:
-                self.add_history("Telemetry connected")
+            if current["telemetry"] != previous.get("telemetry"):
+                title = "Telemetry restored" if current["telemetry"] else "Telemetry connection lost"
+                self.add_history(title, category="SYSTEM", severity="INFO" if current["telemetry"] else "WARNING")
+            if current["power"] != previous.get("power"):
+                self.add_history(f"Profile changed: {previous.get('power', 'Unknown')} → {current['power']}", category="POWER")
+            if current["updates"] != previous.get("updates") and current["updates"] is not None:
+                title = "System packages are current" if current["updates"] == 0 else f"{current['updates']} updates detected"
+                self.add_history(title, category="UPDATE", severity="WARNING" if current["updates"] else "INFO")
+            if current["failed"] != previous.get("failed"):
+                title = "Failed services cleared" if current["failed"] == 0 else f"{current['failed']} failed services detected"
+                self.add_history(title, category="SERVICE", severity="WARNING" if current["failed"] else "INFO")
+            if current["network"] != previous.get("network"):
+                self.add_history(f"Connection changed: {previous.get('network', 'Unknown')} → {current['network']}", category="NETWORK")
+            if current["vpn"] != previous.get("vpn"):
+                vpn_on = str(current["vpn"]).upper() not in ("", "OFF", "VPN OFF", "DISCONNECTED", "UNKNOWN")
+                self.add_history("VPN connection established" if vpn_on else "VPN connection disconnected", category="NETWORK", severity="INFO" if vpn_on else "WARNING")
+            if current["ssh"] != previous.get("ssh"):
+                active = current["ssh"] == "active"
+                self.add_history("SSH service started" if active else "SSH service stopped", category="SECURITY", severity="WARNING" if active else "INFO")
+            if current["gpu"] != previous.get("gpu"):
+                match = re.search(r"\b(P\d+)\b", current["gpu"], re.I)
+                title = f"NVIDIA GPU entered {match.group(1).upper()}" if match else f"NVIDIA GPU state changed to {current['gpu']}"
+                self.add_history(title, category="POWER")
+            if current["snapshot"] != previous.get("snapshot"):
+                self.add_history(f"Snapshot state changed: {previous.get('snapshot', 'Unknown')} → {current['snapshot']}", category="SNAPSHOT")
+        self.event_store.save_observed_states(current)
         self.last_dashboard_state = current
 
     def power_state(self):
@@ -6380,6 +7545,98 @@ class MainWindow(QMainWindow):
                 return "Enabled"
         return "Unknown"
 
+    def cpu_governor(self):
+        path = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        try:
+            return path.read_text().strip()
+        except OSError:
+            return "unknown"
+
+    def gpu_operating_state(self):
+        if not command_exists("nvidia-smi"):
+            return {"driver": "not detected", "power": "--", "state": "unavailable"}
+        output = run_text([
+            "nvidia-smi", "--query-gpu=driver_version,power.draw,pstate",
+            "--format=csv,noheader,nounits",
+        ], 3)[0]
+        if not output:
+            return {"driver": "unknown", "power": "--", "state": "suspended"}
+        parts = [part.strip() for part in output.splitlines()[0].split(",")]
+        driver = parts[0] if parts else "unknown"
+        power = f"{parts[1]} W" if len(parts) > 1 and parts[1] not in ("", "[N/A]") else "power unknown"
+        pstate = parts[2] if len(parts) > 2 else "unknown"
+        return {"driver": driver, "power": power, "state": f"awake {pstate}"}
+
+    def battery_state(self):
+        batteries = sorted(Path("/sys/class/power_supply").glob("BAT*"))
+        if not batteries:
+            return {"status": "Not present", "health": "--", "power": "--"}
+        battery = batteries[0]
+        def read_number(name):
+            try: return float((battery / name).read_text().strip())
+            except (OSError, ValueError): return 0
+        try: status = (battery / "status").read_text().strip()
+        except OSError: status = "Unknown"
+        full = read_number("energy_full") or read_number("charge_full")
+        design = read_number("energy_full_design") or read_number("charge_full_design")
+        health = f"{full / design * 100:.0f}%" if full and design else "Unknown"
+        watts = read_number("power_now") / 1_000_000
+        return {"status": status, "health": health, "power": f"{watts:.1f} W" if watts else "Unknown"}
+
+    def security_state(self):
+        boot = run_text(["bootctl", "status"], 3)[0] if command_exists("bootctl") else ""
+        secure = "Enabled" if re.search(r"Secure Boot:\s+enabled", boot, re.I) else "Disabled" if re.search(r"Secure Boot:\s+disabled", boot, re.I) else "Unknown"
+        source = run_text(["findmnt", "-no", "SOURCE", "/"], 2)[0]
+        encryption = "Enabled" if "/dev/mapper/" in source else "Disabled"
+        ssh = run_text(["systemctl", "is-active", "sshd.service"], 2)[0] or "inactive"
+        ports = run_text(["ss", "-lntuH"], 2)[0] if command_exists("ss") else ""
+        return {"secure_boot": secure, "encryption": encryption, "ssh": ssh, "ports": len([line for line in ports.splitlines() if line.strip()])}
+
+    def network_latency(self):
+        if not command_exists("ping"):
+            return "Unavailable"
+        route = run_text(["ip", "route", "show", "default"], 2)[0]
+        match = re.search(r"\bvia\s+(\S+)", route)
+        if not match:
+            return "Unavailable"
+        output = run_text(["ping", "-c", "1", "-W", "1", match.group(1)], 2)[0]
+        latency = re.search(r"time[=<]([0-9.]+)\s*ms", output)
+        return f"{latency.group(1)} ms" if latency else "No response"
+
+    def dns_state(self):
+        if command_exists("resolvectl"):
+            output = run_text(["resolvectl", "status"], 3)[0]
+            return "Ready" if "DNS Servers:" in output else "Unknown"
+        return "Ready" if Path("/etc/resolv.conf").exists() else "Unavailable"
+
+    def snapshot_state(self):
+        if not command_exists("snapper"):
+            return "Unavailable"
+        output = run_text(["snapper", "list", "--csvout"], 5)[0]
+        rows = [row for row in output.splitlines() if row.strip()]
+        return f"{max(0, len(rows) - 1)} available" if rows else "None found"
+
+    def boot_time(self):
+        output = run_text(["systemd-analyze"], 4)[0]
+        match = re.search(r"=\s+(.+?)\s*$", output)
+        return match.group(1) if match else (output or "Unknown")
+
+    def thermal_lines(self, telemetry):
+        readings = []
+        for label, key in (("CPU", "cpu_temp"), ("GPU", "gpu_temp")):
+            value = float(telemetry.get(key) or 0)
+            status = "CRITICAL" if value >= 80 else "ELEVATED" if value >= 70 else "NORMAL"
+            readings.append(f"{label:<8} {value:.0f}°C · {status}")
+        nvme_temps = []
+        for path in Path("/sys/class/nvme").glob("nvme*/device/hwmon/hwmon*/temp1_input"):
+            try: nvme_temps.append(float(path.read_text().strip()) / 1000)
+            except (OSError, ValueError): pass
+        if nvme_temps:
+            value = max(nvme_temps)
+            status = "CRITICAL" if value >= 80 else "ELEVATED" if value >= 70 else "NORMAL"
+            readings.append(f"NVMe     {value:.0f}°C · {status}")
+        return readings
+
     def storage_health(self):
         if command_exists("smartctl"):
             return "CHECKABLE"
@@ -6395,8 +7652,13 @@ class MainWindow(QMainWindow):
         return "--"
 
     def recent_activity(self, data=None):
-        history = self.change_history[:7]
-        return history or ["No meaningful state changes recorded this session."]
+        rows = self.event_store.recent(7)
+        if not rows:
+            return ["No meaningful system events recorded yet."]
+        return [
+            f"{row['created_utc'][11:16]}  {row['category']:<9} {row['title']}"
+            for row in rows
+        ]
 
     def closeEvent(self, event):
         offline = self.pages.get("offline")
@@ -6411,11 +7673,17 @@ class MainWindow(QMainWindow):
         command_page = self.pages.get("command_code")
         if command_page and hasattr(command_page, "shutdown"):
             command_page.shutdown()
+        intel_page = self.pages.get("intel")
+        if intel_page and hasattr(intel_page, "shutdown"):
+            intel_page.shutdown()
         self.probe_executor.shutdown(wait=False, cancel_futures=True)
+        self.event_store.close()
         super().closeEvent(event)
 
 
 def main():
+    os.umask(0o077)
+    harden_private_storage()
     crash_dir = Path.home() / ".local/state/command-centre"
     crash_dir.mkdir(parents=True, exist_ok=True)
 
@@ -6429,7 +7697,12 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Command Centre")
     app.setApplicationDisplayName("Command Centre")
-    app.setDesktopFileName("command-centre")
+    desktop_entries = (
+        Path.home() / ".local/share/applications/command-centre.desktop",
+        Path("/usr/share/applications/command-centre.desktop"),
+    )
+    if any(path.is_file() for path in desktop_entries):
+        app.setDesktopFileName("command-centre")
     if LOGO_FILE.exists():
         app.setWindowIcon(QIcon(str(LOGO_FILE)))
     app.setStyleSheet(

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An interactive guide to how Command Centre monitors and controls CommandOS.">
+  <title>How Command Centre Works</title>
+  <style>
+    :root {
+      --ink: #e8f0f2; --muted: #91a2a6; --panel: #10191c; --line: #26363a;
+      --lime: #b9f458; --cyan: #54d8d2; --orange: #ff9d57; --bg: #071012;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: var(--bg); font: 16px/1.55 Inter, ui-sans-serif, system-ui, sans-serif; }
+    button, a { font: inherit; }
+    button { color: inherit; }
+    .noise { position: fixed; inset: 0; pointer-events: none; opacity: .035; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E"); }
+    .wrap { width: min(1160px, calc(100% - 40px)); margin: auto; }
+    nav { height: 72px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: -.02em; }
+    .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; color: #081012; background: var(--lime); border-radius: 9px; font-size: 12px; }
+    .nav-links { display: flex; gap: 24px; }
+    a { color: var(--muted); text-decoration: none; }
+    a:hover { color: var(--ink); }
+    .hero { min-height: 680px; display: grid; grid-template-columns: 1.05fr .95fr; align-items: center; gap: 70px; padding: 80px 0; }
+    .eyebrow { margin: 0 0 16px; color: var(--lime); font: 700 12px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .16em; }
+    h1 { margin: 0; max-width: 760px; font-size: clamp(54px, 7vw, 92px); line-height: .95; letter-spacing: -.065em; }
+    .hero-copy { max-width: 620px; margin: 28px 0 36px; color: var(--muted); font-size: 19px; }
+    .actions { display: flex; gap: 12px; }
+    .btn { padding: 12px 18px; border: 1px solid var(--line); border-radius: 8px; background: transparent; cursor: pointer; }
+    .btn.primary { color: #071012; border-color: var(--lime); background: var(--lime); font-weight: 750; }
+    .screen { overflow: hidden; border: 1px solid #304348; border-radius: 14px; background: #0b1416; box-shadow: 0 30px 90px #0009; transform: rotate(1.5deg); }
+    .screen-top { display: flex; align-items: center; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .dot { width: 7px; height: 7px; border-radius: 99px; background: #3a4a4e; }
+    .screen-body { display: grid; grid-template-columns: 130px 1fr; min-height: 390px; }
+    .mini-nav { padding: 18px 12px; border-right: 1px solid var(--line); }
+    .mini-logo { margin-bottom: 30px; color: var(--lime); font-size: 10px; font-weight: 800; }
+    .mini-item { margin: 7px 0; padding: 8px; border-radius: 5px; color: #718287; font-size: 9px; }
+    .mini-item.active { color: var(--ink); background: #182529; }
+    .mini-main { padding: 24px; }
+    .mini-head { display: flex; justify-content: space-between; color: #7e9195; font-size: 9px; }
+    .mini-main h3 { margin: 5px 0 22px; font-size: 20px; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .metric { padding: 13px; border: 1px solid var(--line); border-radius: 7px; }
+    .metric span { color: #77898d; font-size: 8px; text-transform: uppercase; }
+    .metric strong { display: block; margin: 3px 0 10px; font-size: 20px; }
+    .meter { height: 3px; background: #263337; }
+    .meter i { display: block; height: 100%; background: var(--lime); animation: breathe 3s ease-in-out infinite alternate; }
+    .activity { margin-top: 12px; padding: 15px; border: 1px solid var(--line); border-radius: 7px; }
+    .activity-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #1b292c; color: #8b9b9e; font-size: 9px; }
+    .activity-row:last-child { border: 0; }
+    .status { width: 6px; height: 6px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 10px var(--lime); }
+    section { padding: 100px 0; }
+    .section-head { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-bottom: 54px; }
+    h2 { margin: 0; font-size: clamp(36px, 5vw, 62px); line-height: 1; letter-spacing: -.05em; }
+    .section-head p { align-self: end; max-width: 530px; margin: 0; color: var(--muted); }
+    .flow { display: grid; grid-template-columns: repeat(5, 1fr); border-top: 1px solid var(--line); }
+    .step { min-height: 235px; padding: 28px 18px; border-right: 1px solid var(--line); cursor: pointer; transition: .2s; }
+    .step:last-child { border-right: 0; }
+    .step:hover, .step.active { background: #101a1d; }
+    .step.active { box-shadow: inset 0 3px var(--lime); }
+    .step-no { color: var(--lime); font: 700 11px ui-monospace, monospace; }
+    .step h3 { margin: 55px 0 8px; font-size: 18px; }
+    .step p { margin: 0; color: var(--muted); font-size: 13px; }
+    .demo { display: grid; grid-template-columns: 320px 1fr; overflow: hidden; min-height: 420px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .demo-menu { padding: 28px; border-right: 1px solid var(--line); }
+    .demo-menu h3 { margin: 0 0 8px; }
+    .demo-menu > p { margin: 0 0 24px; color: var(--muted); font-size: 13px; }
+    .scenario { width: 100%; margin: 5px 0; padding: 12px; text-align: left; border: 1px solid transparent; border-radius: 6px; background: transparent; cursor: pointer; }
+    .scenario:hover, .scenario.active { border-color: var(--line); background: #172326; }
+    .demo-stage { display: grid; place-items: center; padding: 45px; background: radial-gradient(circle at 50% 20%, #1a292c, #0b1315 60%); }
+    .terminal { width: min(620px, 100%); border: 1px solid #32454a; border-radius: 10px; background: #071012; box-shadow: 0 25px 60px #0008; }
+    .terminal-head { padding: 10px 14px; color: #6f8286; border-bottom: 1px solid var(--line); font: 11px ui-monospace, monospace; }
+    .terminal-body { min-height: 225px; padding: 22px; font: 13px/1.8 ui-monospace, monospace; }
+    .log { opacity: 0; transform: translateY(5px); animation: reveal .35s forwards; }
+    .log.dim { color: #64777b; } .log.ok { color: var(--lime); } .log.warn { color: var(--orange); }
+    .confirm-row { display: none; gap: 10px; margin-top: 18px; }
+    .confirm-row.show { display: flex; }
+    .confirm-row button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 5px; background: #142024; cursor: pointer; }
+    .confirm-row .approve { color: #071012; border-color: var(--lime); background: var(--lime); font-weight: 700; }
+    .modules { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--line); }
+    .module { min-height: 180px; padding: 24px; background: var(--panel); }
+    .module b { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 34px; border: 1px solid #395057; border-radius: 7px; color: var(--cyan); font: 700 10px ui-monospace, monospace; }
+    .module h3 { margin: 0 0 7px; font-size: 16px; }
+    .module p { margin: 0; color: var(--muted); font-size: 12px; }
+    .architecture { display: grid; grid-template-columns: 1fr 54px 1fr 54px 1fr; align-items: center; }
+    .arch-box { min-height: 205px; padding: 28px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .arch-box small { color: var(--lime); font: 700 10px ui-monospace, monospace; text-transform: uppercase; }
+    .arch-box h3 { margin: 30px 0 8px; }
+    .arch-box p { margin: 0; color: var(--muted); font-size: 13px; }
+    .arrow { color: var(--muted); text-align: center; font-size: 22px; }
+    footer { display: flex; justify-content: space-between; padding: 35px 0 50px; color: var(--muted); border-top: 1px solid var(--line); font-size: 13px; }
+    @keyframes breathe { to { width: 72%; } }
+    @keyframes reveal { to { opacity: 1; transform: none; } }
+    @media (max-width: 850px) {
+      .nav-links { display: none; } .hero, .section-head { grid-template-columns: 1fr; }
+      .hero { padding-top: 50px; } .screen { transform: none; } .flow { grid-template-columns: 1fr; }
+      .step { min-height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .step h3 { margin-top: 24px; } .demo { grid-template-columns: 1fr; } .demo-menu { border-right: 0; border-bottom: 1px solid var(--line); }
+      .modules { grid-template-columns: repeat(2, 1fr); } .architecture { grid-template-columns: 1fr; gap: 14px; } .arrow { transform: rotate(90deg); }
+    }
+    @media (max-width: 520px) { .wrap { width: min(100% - 24px, 1160px); } h1 { font-size: 50px; } .modules { grid-template-columns: 1fr; } .metrics { grid-template-columns: 1fr; } .screen-body { grid-template-columns: 90px 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="noise"></div>
+  <header class="wrap">
+    <nav>
+      <div class="brand"><span class="brand-mark">CC</span> Command Centre</div>
+      <div class="nav-links"><a href="#workflow">Workflow</a><a href="#demo">Interactive demo</a><a href="#modules">Modules</a><a href="#architecture">Architecture</a></div>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero wrap">
+      <div>
+        <p class="eyebrow">CommandOS control layer / explained</p>
+        <h1>One view.<br>Full control.</h1>
+        <p class="hero-copy">Command Centre turns live system data, everyday controls, specialist tools, and complex terminal jobs into one safe operations workspace.</p>
+        <div class="actions"><a class="btn primary" href="#demo">Try the walkthrough</a><a class="btn" href="#architecture">See the system</a></div>
+      </div>
+      <div class="screen" aria-label="Command Centre dashboard preview">
+        <div class="screen-top"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div>
+        <div class="screen-body">
+          <div class="mini-nav"><div class="mini-logo">COMMAND // OS</div><div class="mini-item active">Dashboard</div><div class="mini-item">Control</div><div class="mini-item">Tools</div><div class="mini-item">Terminal</div><div class="mini-item">Intel</div></div>
+          <div class="mini-main"><div class="mini-head"><span>OPERATIONS DASHBOARD</span><span>● LIVE</span></div><h3>System Dashboard</h3>
+            <div class="metrics"><div class="metric"><span>CPU</span><strong>28%</strong><div class="meter"><i style="width:28%"></i></div></div><div class="metric"><span>Memory</span><strong>6.2G</strong><div class="meter"><i style="width:44%"></i></div></div><div class="metric"><span>Network</span><strong>1.4M</strong><div class="meter"><i style="width:56%"></i></div></div></div>
+            <div class="activity"><div class="activity-row"><i class="status"></i> Telemetry connected</div><div class="activity-row"><i class="status"></i> Daily Driver profile active</div><div class="activity-row"><i class="status"></i> All monitored services healthy</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <section id="workflow" class="wrap">
+      <div class="section-head"><div><p class="eyebrow">The operating model</p><h2>From intent<br>to verified result.</h2></div><p>Every workflow follows the same readable path. Observation is immediate; system-changing actions pause for a human decision before Command Centre runs them.</p></div>
+      <div class="flow" id="flow">
+        <article class="step active"><span class="step-no">01 / OBSERVE</span><h3>Read live state</h3><p>Telemetry reports CPU, memory, storage, network, battery, updates, and service health.</p></article>
+        <article class="step"><span class="step-no">02 / CHOOSE</span><h3>Select an action</h3><p>Use a module, search with Ctrl+K, or launch a saved deployment profile.</p></article>
+        <article class="step"><span class="step-no">03 / PREVIEW</span><h3>Inspect the command</h3><p>The exact operation and its effect are shown before anything changes.</p></article>
+        <article class="step"><span class="step-no">04 / CONFIRM</span><h3>Approve the change</h3><p>Changing actions require explicit confirmation in the application or terminal.</p></article>
+        <article class="step"><span class="step-no">05 / VERIFY</span><h3>Check the result</h3><p>Output, refreshed telemetry, and change history show whether the action succeeded.</p></article>
+      </div>
+    </section>
+
+    <section id="demo" class="wrap">
+      <div class="section-head"><div><p class="eyebrow">Interactive walkthrough</p><h2>See a safe action<br>in motion.</h2></div><p>Pick a common task. This simulation shows the same confirm-first pattern used throughout Command Centre. It does not make changes to your computer.</p></div>
+      <div class="demo">
+        <aside class="demo-menu"><h3>Choose a task</h3><p>Each route uses the same safety contract.</p><button class="scenario active" data-key="profile">Switch power profile</button><button class="scenario" data-key="service">Restart a service</button><button class="scenario" data-key="package">Install a package</button><button class="scenario" data-key="deployment">Launch a deployment</button></aside>
+        <div class="demo-stage"><div class="terminal"><div class="terminal-head">COMMAND PREVIEW — SIMULATION</div><div class="terminal-body" id="terminalBody"></div></div></div>
+      </div>
+    </section>
+
+    <section id="modules" class="wrap">
+      <div class="section-head"><div><p class="eyebrow">One connected workspace</p><h2>Purpose-built<br>modules.</h2></div><p>Command Centre groups related work without hiding the underlying system. Jump directly with the sidebar or search across actions with the Ctrl+K command palette.</p></div>
+      <div class="modules">
+        <article class="module"><b>SY</b><h3>System Dashboard</h3><p>Live performance, hardware state, updates, and service health.</p></article>
+        <article class="module"><b>SC</b><h3>System Control</h3><p>Profiles, power, Wi-Fi, Bluetooth, audio, services, and recovery.</p></article>
+        <article class="module"><b>TL</b><h3>Tool Library</h3><p>Discover, install, document, and launch local applications.</p></article>
+        <article class="module"><b>CT</b><h3>Command Terminal</h3><p>Workspace explorer, editor tabs, terminal output, and Codex assistance.</p></article>
+        <article class="module"><b>CI</b><h3>Command Intel</h3><p>Case-based research, evidence capture, integrity, reports, and graphs.</p></article>
+        <article class="module"><b>OK</b><h3>Offline Knowledge</h3><p>Search and read local ZIM libraries when the internet is unavailable.</p></article>
+        <article class="module"><b>DP</b><h3>Deployment Centre</h3><p>Reusable, profile-driven mission and environment launchers.</p></article>
+        <article class="module"><b>SW</b><h3>Software Centre</h3><p>Packages, Flatpaks, kernels, updates, exports, and maintenance.</p></article>
+      </div>
+    </section>
+
+    <section id="architecture" class="wrap">
+      <div class="section-head"><div><p class="eyebrow">Under the surface</p><h2>A local-first<br>architecture.</h2></div><p>The native PySide6 application stays close to the machine. It reads local telemetry and calls standard Linux tools, while keeping changing operations behind confirmation.</p></div>
+      <div class="architecture">
+        <article class="arch-box"><small>Input</small><h3>System + user</h3><p>Telemetry service, local fallback data, selected profiles, searches, cases, and explicit user intent.</p></article><div class="arrow">→</div>
+        <article class="arch-box"><small>Control layer</small><h3>Command Centre</h3><p>Native GUI organizes state, previews commands, requests confirmation, and captures output.</p></article><div class="arrow">→</div>
+        <article class="arch-box"><small>Execution</small><h3>Linux services</h3><p>Standard tools such as systemctl, nmcli, pactl, package managers, and curated local utilities.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap"><span>Command Centre · CommandOS operations dashboard</span><span>Observe → preview → confirm → verify</span></footer>
+  <script>
+    const tasks = {
+      profile: { label: "Performance profile", command: "powerprofilesctl set performance", result: "Performance profile is now active." },
+      service: { label: "Restart NetworkManager", command: "systemctl restart NetworkManager", result: "NetworkManager restarted; service is active." },
+      package: { label: "Install wireshark-qt", command: "sudo pacman -S wireshark-qt", result: "Package installed and Tool Library refreshed." },
+      deployment: { label: "Launch Field Operations", command: "command-centre deploy field-ops", result: "Field Operations profile launched successfully." }
+    };
+    const body = document.querySelector("#terminalBody");
+    function renderTask(key) {
+      const task = tasks[key];
+      body.innerHTML = `<div class="log dim">$ request: ${task.label}</div><div class="log" style="animation-delay:.18s">Preparing command preview…</div><div class="log warn" style="animation-delay:.36s">$ ${task.command}</div><div class="log dim" style="animation-delay:.54s">This action changes system state. Confirmation required.</div><div class="confirm-row show log" style="animation-delay:.7s"><button class="approve">Confirm action</button><button class="cancel">Cancel</button></div>`;
+      body.querySelector(".approve").onclick = () => finish(task, true);
+      body.querySelector(".cancel").onclick = () => finish(task, false);
+    }
+    function finish(task, approved) {
+      const row = body.querySelector(".confirm-row"); row.remove();
+      body.insertAdjacentHTML("beforeend", approved ? `<div class="log ok">✓ Approved — simulated execution complete.</div><div class="log">${task.result}</div><div class="log dim">Telemetry refreshed · change recorded</div>` : `<div class="log warn">Action cancelled. No system changes made.</div>`);
+    }
+    document.querySelectorAll(".scenario").forEach(button => button.addEventListener("click", () => {
+      document.querySelector(".scenario.active").classList.remove("active"); button.classList.add("active"); renderTask(button.dataset.key);
+    }));
+    document.querySelectorAll(".step").forEach(step => step.addEventListener("click", () => {
+      document.querySelector(".step.active").classList.remove("active"); step.classList.add("active");
+    }));
+    renderTask("profile");
+  </script>
+</body>
+</html>

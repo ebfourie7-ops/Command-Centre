@@ -1,9 +1,9 @@
 {
   "name": "command-centre",
-  "version": "0.1.0",
-  "description": "Base CommandOS operations dashboard and control layer.",
+  "version": "0.9.0",
+  "description": "CommandOS operations dashboard and investigation workspace.",
   "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "./start.sh"
   }
 }

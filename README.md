@@ -5,27 +5,22 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 ## Current Features
 
 - Native desktop GUI, not browser based
+- Persistent SQLite-backed System Timeline with structured, deduplicated system and Command Centre events
+- Transparent weighted Command OS Readiness Score with a visible progress bar and deduction breakdown
 - Live dashboard using the Command Widget telemetry service
-- System Control for:
-  - Quick Controls with active profiles and power modes
-  - Power profiles through `powerprofilesctl`
-  - Wi-Fi radio through `nmcli`
-  - Bluetooth power through `bluetoothctl`
-  - Default audio output through `pactl`
-  - System service search and terminal-confirmed service actions
-  - System services search, logs, start/stop/restart, enable/disable through terminal-confirmed `systemctl`
-  - Working System tool buttons that open KDE settings modules and system diagnostics
-  - CommandOS profile buttons, security tools, snapshot/recovery commands, Apply Queue, and Change History
 - Confirm-first controls for changing actions
 - Command palette with `Ctrl+K`
-- Main tabs for System Dashboard, System Control, Tool Library, Command Terminal, Offline Knowledge, Deployment Centre, and Software Centre
+- Main tabs for System Dashboard, Tool Library, Command Apps, Command Terminal, Command Intel, Offline Knowledge, and Software Centre
 - Command Apps catalogue with descriptions, installation-state detection, confirm-first installers, a bundled offline Command Widget installer/update action, and a CommandOS Installer placeholder
-- Command Apps can download the complete protected GitHub `main` branch, update the installed Command Centre files, and restart the application
+- Command Apps directs installed systems to reviewed package updates; direct branch downloads and privileged source-tree execution are disabled
 - Software Centre includes update checks, package search, confirm-first install/remove actions, Flatpak updates, package list export, and maintenance command previews
 - Software Centre includes a Kernel Manager for listing, installing, and removing kernels through `chwd-kernel`, plus initramfs and GRUB rebuild actions
 - Tool Library auto-refreshes from live pacman, Flatpak, desktop launcher, and executable scans, with launch, terminal, install, and guide actions
 - Command Terminal provides a VS Code-style workspace with explorer, editor tabs, save/save-all, terminal/output, and an in-app local HTML preview
 - Command Terminal includes a right-side Codex chat panel with Ask, Agent, Edit, and Review modes
+- Agent Hub includes persistent task records with live Plan, Changes, command status, file activity, token usage, elapsed time, pause/stop, diff review, and an auditable activity log
+- Write-capable Codex tasks use a read-only planning pass, structured impact estimates, editable plans, explicit approval, and an automatic pre-execution checkpoint before workspace changes begin
+- Command Terminal provides inspectable Observe, Safe, Develop, Elevated, and Autonomous permission profiles plus automatic pre-task checkpoints for write-capable agent tasks
 - Agent Hub keeps local per-session JSONL chat history, supplies recent history to agents, and provides controls to view, start, delete, and open the stored logs
 - Agent Hub provides provider-aware login, logout, and account-status controls for Codex, Claude, Ollama, FCC Claude, and API-key agents
 - Command Terminal can start `codex login` to link your ChatGPT/OpenAI account and check login status
@@ -36,7 +31,8 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 - Tool and workflow support detects common local OSINT utilities, launches authorized jobs in a terminal, and provides a repeatable domain-research workflow
 - Command AI provides deterministic case summaries and evidence-grounded local analysis through Ollama when a local model is available
 - The v0.2-alpha hardening layer adds automatic database migrations, database backups, case archives, authorization and scope records, exportable ZIP case bundles, case-isolated browser storage/downloads, ad-block allowlisting, rendered HTML capture, structured JSON result imports, strict URL validation, crash reports, and automated data-layer tests
-- Deployment Centre is a profile-driven mission launcher with GUI add/edit/duplicate/remove controls, using JSON templates from `deployments/default_deployments.json` and custom profiles from `~/.config/command-centre/deployment_profiles.json`
+- Command Intel supports password-protected cases with PBKDF2-derived AES-256-GCM encryption for sensitive database fields and copied evidence files; keys remain in memory only while a case is unlocked
+- Command Intel cases can be exported as collision-safe ZIP bundles, HTML reports, printable PDFs, or sent through the system print dialog, with explicit warnings before protected data is decrypted for output
 - Offline Knowledge has a single ZIM library location button, a ZIM file list, and an in-app reader
 
 ## Run
@@ -54,9 +50,9 @@ Command Centre.desktop
 
 ## Versions
 
-- `v0.9` adds GitHub `main` updates, bundled Command Widget installation, local HTML previews, persistent agent chat history, and provider authentication controls.
+- `v0.9` adds secure package-update guidance, bundled Command Widget installation, local HTML previews, persistent agent chat history, and provider authentication controls.
 - `v0.1` is the preserved baseline before the integrated Command Intel case platform.
-- Current development is on the `main` branch.
+- The active development branch is the branch checked out in this workspace.
 
 Command Intel stores its case database and copied evidence under:
 

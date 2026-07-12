@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import html
 import json
@@ -9,14 +10,18 @@ import zipfile
 from urllib.parse import urlparse
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from PySide6.QtCore import QProcess, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QTextDocument
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QGraphicsScene, QGraphicsView, QGridLayout,
+    QComboBox, QDialog, QFileDialog, QFrame, QGraphicsScene, QGraphicsView, QGridLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTableWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -24,6 +29,8 @@ from PySide6.QtWidgets import (
 DATA_DIR = Path.home() / ".local/share/command-centre/intel"
 DB_FILE = DATA_DIR / "intel.db"
 EVIDENCE_DIR = DATA_DIR / "evidence"
+ENCRYPTED_PREFIX = "enc:v1:"
+VAULT_MAGIC = b"COMMAND-INTEL-VAULT-1\n"
 
 
 class RequestBlocker(QWebEngineUrlRequestInterceptor):
@@ -51,10 +58,27 @@ class RequestBlocker(QWebEngineUrlRequestInterceptor):
 
 
 class IntelStore:
+    PROTECTED_FIELDS = {
+        "cases": ("description", "authorization", "scope", "jurisdiction"),
+        "evidence": ("title", "source", "local_path", "notes"),
+        "entities": ("value", "source"),
+        "relations": ("label",),
+        "activity": ("action", "detail"),
+        "targets": ("value", "purpose", "notes"),
+        "plans": ("title", "objective"),
+        "tasks": ("title", "resource", "input", "output"),
+        "evidence_inbox": ("title", "source", "local_path", "notes"),
+        "findings": ("title", "narrative", "limitations"),
+        "custody_events": ("detail",),
+    }
+
     def __init__(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        DATA_DIR.chmod(0o700)
+        EVIDENCE_DIR.chmod(0o700)
         self.db = sqlite3.connect(DB_FILE)
+        DB_FILE.chmod(0o600)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
             PRAGMA foreign_keys=ON;
@@ -128,12 +152,112 @@ class IntelStore:
         self.ensure_column("cases", "jurisdiction", "TEXT DEFAULT ''")
         self.ensure_column("cases", "classification", "TEXT DEFAULT 'Private'")
         self.ensure_column("cases", "retention_until", "TEXT DEFAULT ''")
+        self.ensure_column("cases", "password_salt", "TEXT DEFAULT ''")
+        self.ensure_column("cases", "password_verifier", "TEXT DEFAULT ''")
         self.db.commit()
+        self.case_keys = {}
 
     def ensure_column(self, table, name, declaration):
         columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
         if name not in columns:
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+    @staticmethod
+    def derive_key(password, salt):
+        return PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000).derive(password.encode("utf-8"))
+
+    @staticmethod
+    def encrypt_with_key(key, value):
+        if value in (None, "") or str(value).startswith(ENCRYPTED_PREFIX): return value or ""
+        nonce = __import__("os").urandom(12)
+        payload = nonce + AESGCM(key).encrypt(nonce, str(value).encode("utf-8"), None)
+        return ENCRYPTED_PREFIX + base64.urlsafe_b64encode(payload).decode("ascii")
+
+    @staticmethod
+    def decrypt_with_key(key, value):
+        if value in (None, "") or not str(value).startswith(ENCRYPTED_PREFIX): return value or ""
+        payload = base64.urlsafe_b64decode(str(value)[len(ENCRYPTED_PREFIX):])
+        return AESGCM(key).decrypt(payload[:12], payload[12:], None).decode("utf-8")
+
+    def is_protected(self, case_id):
+        row = self.db.execute("SELECT password_salt FROM cases WHERE id=?", (case_id,)).fetchone()
+        return bool(row and row[0])
+
+    def is_unlocked(self, case_id): return not self.is_protected(case_id) or case_id in self.case_keys
+
+    def unlock_case(self, case_id, password):
+        row = self.db.execute("SELECT password_salt,password_verifier FROM cases WHERE id=?", (case_id,)).fetchone()
+        if not row or not row["password_salt"]: return True
+        try:
+            key = self.derive_key(password, base64.b64decode(row["password_salt"]))
+            valid = self.decrypt_with_key(key, row["password_verifier"]) == f"command-intel-case-{case_id}"
+        except Exception: return False
+        if valid: self.case_keys[case_id] = key
+        return valid
+
+    def lock_case(self, case_id): self.case_keys.pop(case_id, None)
+
+    def protect_text(self, case_id, value):
+        key = self.case_keys.get(case_id)
+        if key: return self.encrypt_with_key(key, value)
+        if case_id and self.is_protected(case_id): raise PermissionError("Case is locked")
+        return value
+
+    def reveal_text(self, case_id, value):
+        if not str(value or "").startswith(ENCRYPTED_PREFIX): return value or ""
+        key = self.case_keys.get(case_id)
+        if not key: raise PermissionError("Case is locked")
+        return self.decrypt_with_key(key, value)
+
+    def protect_case(self, case_id, password):
+        if self.is_protected(case_id): raise ValueError("Case is already password protected")
+        salt = __import__("os").urandom(16); key = self.derive_key(password, salt); self.case_keys[case_id] = key
+        verifier = self.encrypt_with_key(key, f"command-intel-case-{case_id}")
+        self.db.execute("UPDATE cases SET password_salt=?,password_verifier=? WHERE id=?", (base64.b64encode(salt).decode("ascii"), verifier, case_id))
+        for table in ("evidence", "evidence_inbox"):
+            for row in self.db.execute(f"SELECT id,local_path FROM {table} WHERE case_id=?", (case_id,)).fetchall():
+                if row["local_path"] and not str(row["local_path"]).startswith(ENCRYPTED_PREFIX):
+                    encrypted_path = self.encrypt_evidence_file(case_id, row["local_path"])
+                    if encrypted_path: self.db.execute(f"UPDATE {table} SET local_path=? WHERE id=?", (encrypted_path, row["id"]))
+        for table, fields in self.PROTECTED_FIELDS.items():
+            if table == "cases": rows = self.db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchall(); id_column = "id"
+            elif "case_id" in {column[1] for column in self.db.execute(f"PRAGMA table_info({table})")}: rows = self.db.execute(f"SELECT * FROM {table} WHERE case_id=?", (case_id,)).fetchall(); id_column = "id"
+            else: continue
+            for row in rows:
+                updates = {field: self.encrypt_with_key(key, row[field]) for field in fields if field in row.keys() and row[field] not in (None, "")}
+                if updates:
+                    self.db.execute(f"UPDATE {table} SET " + ",".join(f"{field}=?" for field in updates) + f" WHERE {id_column}=?", (*updates.values(), row[id_column]))
+        self.db.commit()
+
+    def encrypt_evidence_file(self, case_id, path):
+        key = self.case_keys.get(case_id); source = Path(path)
+        if not key or not source.exists() or not source.is_file(): return str(path)
+        if source.suffix == ".ccvault": return str(source)
+        nonce = __import__("os").urandom(12)
+        encrypted = AESGCM(key).encrypt(nonce, source.read_bytes(), f"case:{case_id}".encode())
+        destination = source.with_name(source.name + ".ccvault")
+        destination.write_bytes(VAULT_MAGIC + nonce + encrypted)
+        source.unlink()
+        return str(destination)
+
+    def evidence_bytes(self, case_id, path):
+        source = Path(path); payload = source.read_bytes()
+        if not payload.startswith(VAULT_MAGIC): return payload
+        key = self.case_keys.get(case_id)
+        if not key: raise PermissionError("Case is locked")
+        encrypted = payload[len(VAULT_MAGIC):]
+        return AESGCM(key).decrypt(encrypted[:12], encrypted[12:], f"case:{case_id}".encode())
+
+    def evidence_digest(self, case_id, path): return hashlib.sha256(self.evidence_bytes(case_id, path)).hexdigest()
+
+    def decrypt_row(self, table, row):
+        if not row: return row
+        data = dict(row); case_id = data.get("case_id") or (data.get("id") if table == "cases" else None)
+        for field in self.PROTECTED_FIELDS.get(table, ()):
+            if field in data: data[field] = self.reveal_text(case_id, data[field])
+        return data
+
+    def case_record(self, case_id): return self.decrypt_row("cases", self.db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone())
 
     @staticmethod
     def now():
@@ -155,6 +279,8 @@ class IntelStore:
     def update_case(self, case_id, **fields):
         allowed = {"name", "description", "status", "authorization", "scope", "jurisdiction", "classification", "retention_until"}
         values = {key: value for key, value in fields.items() if key in allowed}
+        for key in self.PROTECTED_FIELDS["cases"]:
+            if key in values: values[key] = self.protect_text(case_id, values[key])
         if not values: return
         values["updated_utc"] = self.now()
         assignments = ",".join(f"{key}=?" for key in values)
@@ -168,12 +294,12 @@ class IntelStore:
         self.db.backup(target); target.close()
 
     def evidence(self, case_id):
-        return self.db.execute("SELECT * FROM evidence WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()
+        return [self.decrypt_row("evidence", row) for row in self.db.execute("SELECT * FROM evidence WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()]
 
     def add_evidence(self, case_id, title, kind, source="", local_path="", digest="", notes=""):
         cursor = self.db.execute(
             "INSERT INTO evidence(case_id,title,kind,source,local_path,sha256,notes,created_utc) VALUES(?,?,?,?,?,?,?,?)",
-            (case_id, title, kind, source, local_path, digest, notes, self.now()),
+            (case_id, self.protect_text(case_id,title), kind, self.protect_text(case_id,source), self.protect_text(case_id,local_path), digest, self.protect_text(case_id,notes), self.now()),
         )
         evidence_id = cursor.lastrowid
         self.log(case_id, "Evidence added", title)
@@ -188,56 +314,57 @@ class IntelStore:
         payload = f"{case_id}|{evidence_id or ''}|{action}|{detail}|{created}|{previous_hash}"
         event_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         self.db.execute("INSERT INTO custody_events(case_id,evidence_id,action,detail,previous_hash,event_hash,created_utc) VALUES(?,?,?,?,?,?,?)",
-                        (case_id, evidence_id, action, detail, previous_hash, event_hash, created))
+                        (case_id, evidence_id, action, self.protect_text(case_id,detail), previous_hash, event_hash, created))
 
     def add_inbox(self, case_id, title, kind, source="", local_path="", digest="", notes=""):
         cursor = self.db.execute("INSERT INTO evidence_inbox(case_id,title,kind,source,local_path,sha256,notes,collected_utc) VALUES(?,?,?,?,?,?,?,?)",
-                                 (case_id,title,kind,source,local_path,digest,notes,self.now()))
+                                 (case_id,self.protect_text(case_id,title),kind,self.protect_text(case_id,source),self.protect_text(case_id,local_path),digest,self.protect_text(case_id,notes),self.now()))
         self.log(case_id, "Collected to inbox", title); self.db.commit(); return cursor.lastrowid
 
     def inbox(self, case_id, status="unreviewed"):
-        return self.db.execute("SELECT * FROM evidence_inbox WHERE case_id=? AND status=? ORDER BY id DESC", (case_id,status)).fetchall()
+        return [self.decrypt_row("evidence_inbox", row) for row in self.db.execute("SELECT * FROM evidence_inbox WHERE case_id=? AND status=? ORDER BY id DESC", (case_id,status)).fetchall()]
 
     def accept_inbox(self, inbox_id):
         row = self.db.execute("SELECT * FROM evidence_inbox WHERE id=?", (inbox_id,)).fetchone()
         if not row: return None
+        row = self.decrypt_row("evidence_inbox", row)
         evidence_id = self.add_evidence(row["case_id"],row["title"],row["kind"],row["source"],row["local_path"],row["sha256"],row["notes"])
         self.db.execute("UPDATE evidence_inbox SET status='accepted' WHERE id=?", (inbox_id,)); self.db.commit(); return evidence_id
 
     def add_target(self, case_id, target_type, value, purpose=""):
-        cursor = self.db.execute("INSERT OR IGNORE INTO targets(case_id,type,value,purpose,created_utc) VALUES(?,?,?,?,?)", (case_id,target_type,value,purpose,self.now()))
+        cursor = self.db.execute("INSERT OR IGNORE INTO targets(case_id,type,value,purpose,created_utc) VALUES(?,?,?,?,?)", (case_id,target_type,self.protect_text(case_id,value),self.protect_text(case_id,purpose),self.now()))
         self.log(case_id,"Target added",f"{target_type}: {value}"); self.db.commit(); return cursor.lastrowid
 
-    def targets(self, case_id): return self.db.execute("SELECT * FROM targets WHERE case_id=? ORDER BY id", (case_id,)).fetchall()
-    def findings(self, case_id): return self.db.execute("SELECT * FROM findings WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()
+    def targets(self, case_id): return [self.decrypt_row("targets", row) for row in self.db.execute("SELECT * FROM targets WHERE case_id=? ORDER BY id", (case_id,)).fetchall()]
+    def findings(self, case_id): return [self.decrypt_row("findings", row) for row in self.db.execute("SELECT * FROM findings WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()]
     def add_finding(self, case_id, title, narrative, confidence="medium"):
-        now=self.now(); cursor=self.db.execute("INSERT INTO findings(case_id,title,narrative,confidence,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",(case_id,title,narrative,confidence,now,now)); self.log(case_id,"Draft finding created",title); self.db.commit(); return cursor.lastrowid
-    def activity(self, case_id, limit=12): return self.db.execute("SELECT * FROM activity WHERE case_id=? ORDER BY id DESC LIMIT ?",(case_id,limit)).fetchall()
+        now=self.now(); cursor=self.db.execute("INSERT INTO findings(case_id,title,narrative,confidence,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",(case_id,self.protect_text(case_id,title),self.protect_text(case_id,narrative),confidence,now,now)); self.log(case_id,"Draft finding created",title); self.db.commit(); return cursor.lastrowid
+    def activity(self, case_id, limit=12): return [self.decrypt_row("activity", row) for row in self.db.execute("SELECT * FROM activity WHERE case_id=? ORDER BY id DESC LIMIT ?",(case_id,limit)).fetchall()]
 
     def add_entity(self, case_id, entity_type, value, source="", confidence=50):
         self.db.execute(
             "INSERT OR IGNORE INTO entities(case_id,type,value,source,confidence) VALUES(?,?,?,?,?)",
-            (case_id, entity_type, value, source, confidence),
+            (case_id, entity_type, self.protect_text(case_id,value), self.protect_text(case_id,source), confidence),
         )
         self.db.commit()
 
     def entities(self, case_id):
-        return self.db.execute("SELECT * FROM entities WHERE case_id=? ORDER BY id", (case_id,)).fetchall()
+        return [self.decrypt_row("entities", row) for row in self.db.execute("SELECT * FROM entities WHERE case_id=? ORDER BY id", (case_id,)).fetchall()]
 
     def add_relation(self, case_id, source_id, target_id, label, evidence_id=None):
         self.db.execute(
             "INSERT OR IGNORE INTO relations(case_id,source_entity,target_entity,label,evidence_id) VALUES(?,?,?,?,?)",
-            (case_id, source_id, target_id, label, evidence_id),
+            (case_id, source_id, target_id, self.protect_text(case_id,label), evidence_id),
         )
         self.db.commit()
 
     def relations(self, case_id):
-        return self.db.execute("SELECT * FROM relations WHERE case_id=?", (case_id,)).fetchall()
+        return [self.decrypt_row("relations", row) for row in self.db.execute("SELECT * FROM relations WHERE case_id=?", (case_id,)).fetchall()]
 
     def log(self, case_id, action, detail=""):
         self.db.execute(
             "INSERT INTO activity(case_id,action,detail,created_utc) VALUES(?,?,?,?)",
-            (case_id, action, detail, self.now()),
+            (case_id, self.protect_text(case_id,action), self.protect_text(case_id,detail), self.now()),
         )
         if case_id:
             self.db.execute("UPDATE cases SET updated_utc=? WHERE id=?", (self.now(), case_id))
@@ -252,8 +379,10 @@ class AdvancedCommandIntelPage(QWidget):
         self.providers = providers
         self.store = IntelStore()
         self.case_id = None
+        self.suppress_case_auto_open = False
         self.blocker = RequestBlocker(self)
         self.browser_profiles = {}
+        self.ollama_process = None
         self.tabs = QTabWidget()
         self.browser_tabs = QTabWidget()
         self.browser_tabs.setTabsClosable(True)
@@ -446,11 +575,16 @@ class AdvancedCommandIntelPage(QWidget):
     def build_cases(self):
         page = QWidget(); layout = QVBoxLayout(page)
         cases, cases_layout = self.frame("CASES")
-        self.case_list = QListWidget(); new = QPushButton("New case"); edit = QPushButton("Authorization & scope"); archive = QPushButton("Archive"); delete = QPushButton("Delete"); backup = QPushButton("Backup database"); bundle = QPushButton("Export case bundle"); report = QPushButton("Export HTML report")
+        cases.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.case_list = QListWidget(); self.case_list.setMinimumHeight(100); self.case_list.setMaximumHeight(360)
+        new = QPushButton("New case"); edit = QPushButton("Authorization & scope"); protect = QPushButton("Set case password"); lock = QPushButton("Lock case"); archive = QPushButton("Archive"); delete = QPushButton("Delete"); backup = QPushButton("Backup database"); bundle = QPushButton("Export case bundle"); report = QPushButton("Export HTML"); pdf = QPushButton("Export PDF"); print_case = QPushButton("Print case")
         cases_layout.addWidget(self.case_list)
-        for button in (new, edit, archive, delete, backup, bundle, report): cases_layout.addWidget(button)
-        layout.addWidget(cases)
-        new.clicked.connect(self.new_case); edit.clicked.connect(self.edit_case); archive.clicked.connect(self.archive_case); delete.clicked.connect(self.delete_case); backup.clicked.connect(self.backup_database); bundle.clicked.connect(self.export_case_bundle); report.clicked.connect(self.export_report); self.case_list.currentItemChanged.connect(self.case_list_changed)
+        actions=QGridLayout()
+        for index,button in enumerate((new,edit,protect,lock,archive,delete,backup,bundle,report,pdf,print_case)): actions.addWidget(button,index//3,index%3)
+        actions.setColumnStretch(0,1); actions.setColumnStretch(1,1); actions.setColumnStretch(2,1)
+        cases_layout.addLayout(actions)
+        layout.addWidget(cases,0,Qt.AlignTop); layout.addStretch(1)
+        new.clicked.connect(self.new_case); edit.clicked.connect(self.edit_case); protect.clicked.connect(self.set_case_password); lock.clicked.connect(self.lock_case); archive.clicked.connect(self.archive_case); delete.clicked.connect(self.delete_case); backup.clicked.connect(self.backup_database); bundle.clicked.connect(self.export_case_bundle); report.clicked.connect(self.export_report); pdf.clicked.connect(self.export_pdf); print_case.clicked.connect(self.print_case); self.case_list.currentItemChanged.connect(self.case_list_changed)
         self.tabs.addTab(page, "Cases")
 
     def build_evidence(self):
@@ -474,22 +608,49 @@ class AdvancedCommandIntelPage(QWidget):
         active = self.case_id
         self.case_list.clear(); self.case_combo.blockSignals(True); self.case_combo.clear()
         for row in self.store.cases():
-            item = QListWidgetItem(f"{row['name']}\n{row['updated_utc']}"); item.setData(Qt.UserRole, row["id"]); self.case_list.addItem(item)
-            self.case_combo.addItem(row["name"], row["id"])
+            protection = "🔒 PROTECTED" if row["password_salt"] else "UNPROTECTED"
+            item = QListWidgetItem(f"{row['name']}  ·  {protection}\n{row['updated_utc']}"); item.setData(Qt.UserRole, row["id"]); self.case_list.addItem(item)
+            self.case_combo.addItem(("🔒 " if row["password_salt"] else "") + row["name"], row["id"])
+        visible_rows=max(1,min(self.case_list.count(),5)); row_height=max(54,self.case_list.sizeHintForRow(0) if self.case_list.count() else 54)
+        self.case_list.setFixedHeight(max(100,min(360,visible_rows*row_height+12)))
         self.case_combo.blockSignals(False)
         if active:
             index = self.case_combo.findData(active)
             if index >= 0: self.case_combo.setCurrentIndex(index); self.select_case(index)
-        elif self.case_combo.count(): self.select_case(0)
+        elif self.case_combo.count() and not self.suppress_case_auto_open: self.select_case(0)
         else: self.refresh_overview()
+        self.suppress_case_auto_open = False
 
     def new_case(self):
         name, ok = QInputDialog.getText(self, "New investigation", "Case name:")
-        if ok and name.strip(): self.case_id = self.store.add_case(name.strip()); self.refresh_cases(); self.refresh_evidence()
+        if not ok or not name.strip(): return
+        self.case_id = self.store.add_case(name.strip())
+        password, protected = QInputDialog.getText(self, "Protect case", "Optional password (leave blank for no encryption):", QLineEdit.Password)
+        if protected and password:
+            if len(password)<10: QMessageBox.warning(self,"Case password","Use at least 10 characters. The case was created without encryption."); self.refresh_cases(); return
+            confirmation, confirmed = QInputDialog.getText(self, "Confirm password", "Repeat case password:", QLineEdit.Password)
+            if not confirmed or confirmation != password:
+                QMessageBox.warning(self, "Case password", "Passwords did not match. The case was created without encryption.")
+            else: self.store.protect_case(self.case_id, password)
+        self.refresh_cases(); self.refresh_evidence()
+
+    def set_case_password(self):
+        if not self.require_case(): return
+        if self.store.is_protected(self.case_id): QMessageBox.information(self,"Case protection","This case is already password protected."); return
+        password, ok = QInputDialog.getText(self,"Set case password","New password (minimum 10 characters):",QLineEdit.Password)
+        if not ok:return
+        if len(password)<10: QMessageBox.warning(self,"Case protection","Use at least 10 characters."); return
+        confirmation,ok=QInputDialog.getText(self,"Confirm password","Repeat password:",QLineEdit.Password)
+        if not ok or confirmation!=password: QMessageBox.warning(self,"Case protection","Passwords did not match."); return
+        self.store.protect_case(self.case_id,password); self.status.setText("Case data and copied evidence encrypted; key held in memory for this session."); self.refresh_cases()
+
+    def lock_case(self):
+        if not self.case_id:return
+        case_id=self.case_id; self.store.lock_case(case_id); self.case_id=None; self.suppress_case_auto_open=True; self.refresh_cases(); self.status.setText("Case locked and encryption key removed from memory.")
 
     def edit_case(self):
         if not self.require_case(): return
-        row = self.store.db.execute("SELECT * FROM cases WHERE id=?", (self.case_id,)).fetchone()
+        row = self.store.case_record(self.case_id)
         authorization, ok = QInputDialog.getMultiLineText(self, "Authorization", "Authority and purpose:", row["authorization"] or "")
         if not ok: return
         scope, ok = QInputDialog.getMultiLineText(self, "Scope", "Authorized targets and limits:", row["scope"] or "")
@@ -512,6 +673,7 @@ class AdvancedCommandIntelPage(QWidget):
 
     def export_case_bundle(self):
         if not self.require_case(): return
+        if self.store.is_protected(self.case_id) and QMessageBox.question(self,"Export protected case","This export contains decrypted case data and evidence. Continue?")!=QMessageBox.Yes:return
         target, _ = QFileDialog.getSaveFileName(self, "Export case bundle", f"command-intel-case-{self.case_id}.zip", "ZIP (*.zip)")
         if not target: return
         manifest = {"case_id": self.case_id, "exported_utc": self.store.now(),
@@ -520,16 +682,25 @@ class AdvancedCommandIntelPage(QWidget):
                     "entities": [dict(row) for row in self.store.entities(self.case_id)],
                     "relations": [dict(row) for row in self.store.relations(self.case_id)],
                     "findings": [dict(row) for row in self.store.findings(self.case_id)],
-                    "custody_events": [dict(row) for row in self.store.db.execute("SELECT * FROM custody_events WHERE case_id=? ORDER BY id",(self.case_id,)).fetchall()]}
+                    "custody_events": [self.store.decrypt_row("custody_events",row) for row in self.store.db.execute("SELECT * FROM custody_events WHERE case_id=? ORDER BY id",(self.case_id,)).fetchall()]}
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2))
             for row in self.store.evidence(self.case_id):
                 path = Path(row["local_path"]) if row["local_path"] else None
-                if path and path.exists() and path.is_file(): archive.write(path, f"evidence/{path.name}")
+                if path and path.exists() and path.is_file():
+                    original_name = Path(row["source"]).name if row["source"] and not row["source"].startswith(("http://","https://")) else path.name.removesuffix(".ccvault")
+                    safe_name = re.sub(r"[^A-Za-z0-9._-]+","_",original_name) or "evidence.bin"
+                    archive.writestr(f"evidence/E-{row['id']:04d}-{safe_name}",self.store.evidence_bytes(self.case_id,path))
         self.status.setText(f"Case bundle exported to {target}")
 
     def select_case(self, index):
-        self.case_id = self.case_combo.itemData(index) if index >= 0 else None
+        case_id = self.case_combo.itemData(index) if index >= 0 else None
+        if case_id and self.store.is_protected(case_id) and not self.store.is_unlocked(case_id):
+            password, ok = QInputDialog.getText(self,"Unlock protected case","Case password:",QLineEdit.Password)
+            if not ok or not self.store.unlock_case(case_id,password):
+                if ok: QMessageBox.warning(self,"Protected case","Incorrect password.")
+                self.case_id=None; self.refresh_overview(); return
+        self.case_id = case_id
         for i in range(self.case_list.count()):
             if self.case_list.item(i).data(Qt.UserRole) == self.case_id: self.case_list.setCurrentRow(i); break
         self.refresh_evidence(); self.refresh_inbox(); self.refresh_graph(); self.refresh_overview(); self.refresh_findings()
@@ -557,6 +728,7 @@ class AdvancedCommandIntelPage(QWidget):
         source_path = Path(source); case_dir = EVIDENCE_DIR / str(self.case_id); case_dir.mkdir(parents=True, exist_ok=True)
         destination = case_dir / f"{int(time.time())}-{source_path.name}"; shutil.copy2(source_path, destination)
         digest = self.hash_file(destination)
+        if self.store.is_protected(self.case_id): destination = Path(self.store.encrypt_evidence_file(self.case_id,destination))
         self.store.add_inbox(self.case_id, source_path.name, "file", str(source_path), str(destination), digest)
         self.refresh_inbox(); self.refresh_overview()
 
@@ -567,18 +739,22 @@ class AdvancedCommandIntelPage(QWidget):
 
     def capture_page(self):
         if not self.require_case() or not self.current_browser(): return
-        browser = self.current_browser(); case_dir = EVIDENCE_DIR / str(self.case_id); case_dir.mkdir(parents=True, exist_ok=True)
+        browser = self.current_browser(); capture_case_id=self.case_id; case_dir = EVIDENCE_DIR / str(capture_case_id); case_dir.mkdir(parents=True, exist_ok=True)
         path = case_dir / f"web-{int(time.time())}.png"
         if browser.grab().save(str(path), "PNG"):
-            digest = self.hash_file(path); self.store.add_inbox(self.case_id, browser.title() or "Web capture", "screenshot", browser.url().toString(), str(path), digest)
-            browser.page().toHtml(lambda markup, b=browser, folder=case_dir: self.save_page_html(markup, b, folder))
+            digest = self.hash_file(path)
+            if self.store.is_protected(capture_case_id): path=Path(self.store.encrypt_evidence_file(capture_case_id,path))
+            self.store.add_inbox(capture_case_id, browser.title() or "Web capture", "screenshot", browser.url().toString(), str(path), digest)
+            browser.page().toHtml(lambda markup, b=browser, folder=case_dir, cid=capture_case_id: self.save_page_html(markup, b, folder, cid))
             self.refresh_inbox(); self.refresh_overview(); self.status.setText(f"Collected {path.name} to Evidence Inbox")
 
-    def save_page_html(self, markup, browser, case_dir):
+    def save_page_html(self, markup, browser, case_dir, case_id):
         path = case_dir / f"web-{int(time.time())}.html"
         path.write_text(markup, encoding="utf-8")
-        self.store.add_inbox(self.case_id, f"{browser.title() or 'Web page'} (HTML)", "web-page", browser.url().toString(), str(path), self.hash_file(path), "Captured rendered page source")
-        self.refresh_inbox(); self.refresh_overview()
+        digest=self.hash_file(path)
+        if self.store.is_protected(case_id): path=Path(self.store.encrypt_evidence_file(case_id,path))
+        self.store.add_inbox(case_id, f"{browser.title() or 'Web page'} (HTML)", "web-page", browser.url().toString(), str(path), digest, "Captured rendered page source")
+        if self.case_id==case_id: self.refresh_inbox(); self.refresh_overview()
 
     def refresh_evidence(self):
         rows = self.store.evidence(self.case_id) if self.case_id else []
@@ -622,7 +798,7 @@ class AdvancedCommandIntelPage(QWidget):
         self.target_list.clear(); self.activity_list.clear()
         if not self.case_id:
             self.investigation_status.setText("NO ACTIVE CASE  ·  COLLECTION WILL NOT BE RETAINED"); self.overview_summary.setText("Create or select a case to begin."); return
-        case=self.store.db.execute("SELECT * FROM cases WHERE id=?",(self.case_id,)).fetchone()
+        case=self.store.case_record(self.case_id)
         targets=self.store.targets(self.case_id); evidence=self.store.evidence(self.case_id); entities=self.store.entities(self.case_id); findings=self.store.findings(self.case_id); inbox=self.store.inbox(self.case_id)
         scope="DEFINED" if (case["scope"] or "").strip() else "MISSING"; authorization="RECORDED" if (case["authorization"] or "").strip() else "MISSING"
         self.investigation_status.setText(f"SCOPE  {scope}  ·  AUTHORIZATION  {authorization}  ·  TARGETS {len(targets)}  ·  EVIDENCE {len(evidence)}  ·  ENTITIES {len(entities)}  ·  FINDINGS {len(findings)}")
@@ -633,18 +809,26 @@ class AdvancedCommandIntelPage(QWidget):
 
     def verify_hashes(self):
         if not self.require_case(): return
-        good = bad = 0
+        good = bad = missing = unverifiable = 0
         for row in self.store.evidence(self.case_id):
-            if row["local_path"] and row["sha256"] and Path(row["local_path"]).exists():
-                if self.hash_file(row["local_path"]) == row["sha256"]: good += 1
-                else: bad += 1
-        QMessageBox.information(self, "Integrity verification", f"Verified: {good}\nChanged or invalid: {bad}")
+            if not row["local_path"] or not row["sha256"]: unverifiable += 1; continue
+            if not Path(row["local_path"]).exists(): missing += 1; continue
+            try: digest=self.store.evidence_digest(self.case_id,row["local_path"])
+            except Exception: bad += 1; continue
+            if digest == row["sha256"]: good += 1
+            else: bad += 1
+        QMessageBox.information(self, "Integrity verification", f"Verified: {good}\nChanged or invalid: {bad}\nMissing files: {missing}\nNo stored digest: {unverifiable}")
 
     def export_report(self):
         if not self.require_case(): return
+        if not self.confirm_decrypted_output("Export HTML"): return
         target, _ = QFileDialog.getSaveFileName(self, "Export report", "command-intel-report.html", "HTML (*.html)")
         if not target: return
-        case = self.store.db.execute("SELECT * FROM cases WHERE id=?", (self.case_id,)).fetchone()
+        Path(target).write_text(self.case_report_html(), encoding="utf-8")
+        self.status.setText(f"Report exported to {target}")
+
+    def case_report_html(self):
+        case = self.store.case_record(self.case_id)
         rows = self.store.evidence(self.case_id); entities = self.store.entities(self.case_id); findings=self.store.findings(self.case_id)
         body = [f"<h1>{html.escape(case['name'])}</h1><p>Created {case['created_utc']}</p>",
                 f"<h2>Scope &amp; Authorization</h2><p><b>Authorization:</b> {html.escape(case['authorization'] or 'Not recorded')}</p><p><b>Scope:</b> {html.escape(case['scope'] or 'Not recorded')}</p>",
@@ -652,8 +836,25 @@ class AdvancedCommandIntelPage(QWidget):
                 "<h2>Evidence</h2><table><tr><th>UTC</th><th>Type</th><th>Title</th><th>SHA-256</th><th>Source</th></tr>"]
         for row in rows: body.append("<tr>" + "".join(f"<td>{html.escape(str(row[key] or ''))}</td>" for key in ("created_utc","kind","title","sha256","source")) + "</tr>")
         body.append("</table><h2>Entities</h2><ul>" + "".join(f"<li>{html.escape(r['type'])}: {html.escape(r['value'])} ({r['confidence']}%)</li>" for r in entities) + "</ul>")
-        Path(target).write_text("<!doctype html><meta charset='utf-8'><style>body{font-family:sans-serif;max-width:1100px;margin:auto;background:#111;color:#eee}table{border-collapse:collapse;width:100%}td,th{border:1px solid #555;padding:7px}</style>" + "".join(body), encoding="utf-8")
-        self.status.setText(f"Report exported to {target}")
+        return "<!doctype html><meta charset='utf-8'><style>body{font-family:sans-serif;color:#111}table{border-collapse:collapse;width:100%}td,th{border:1px solid #555;padding:7px}h1,h2{color:#123b59}</style>" + "".join(body)
+
+    def confirm_decrypted_output(self, action):
+        return not self.store.is_protected(self.case_id) or QMessageBox.question(self,action,"This output contains decrypted protected-case data. Continue?")==QMessageBox.Yes
+
+    def export_pdf(self):
+        if not self.require_case(): return
+        if not self.confirm_decrypted_output("Export PDF"): return
+        target,_=QFileDialog.getSaveFileName(self,"Export case PDF",f"command-intel-case-{self.case_id}.pdf","PDF (*.pdf)")
+        if not target:return
+        printer=QPrinter(QPrinter.PrinterMode.HighResolution); printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat); printer.setOutputFileName(target)
+        document=QTextDocument(); document.setHtml(self.case_report_html()); document.print_(printer); self.status.setText(f"PDF exported to {target}")
+
+    def print_case(self):
+        if not self.require_case(): return
+        if not self.confirm_decrypted_output("Print case"): return
+        printer=QPrinter(QPrinter.PrinterMode.HighResolution); dialog=QPrintDialog(printer,self)
+        if dialog.exec()!=QDialog.Accepted:return
+        document=QTextDocument(); document.setHtml(self.case_report_html()); document.print_(printer); self.status.setText("Case sent to printer")
 
     def build_graph(self):
         page = QWidget(); layout = QVBoxLayout(page); controls = QHBoxLayout()
@@ -818,6 +1019,19 @@ class AdvancedCommandIntelPage(QWidget):
         if not shutil.which("ollama"): QMessageBox.information(self, "Local AI unavailable", "Install Ollama and a local model to enable generative case analysis. Deterministic summaries remain available."); return
         models = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=10).stdout.splitlines()[1:]
         if not models: QMessageBox.information(self, "No local model", "Download an Ollama model first."); return
+        if self.ollama_process and self.ollama_process.state()!=QProcess.ProcessState.NotRunning: QMessageBox.information(self,"Local AI","An analysis is already running."); return
         model = models[0].split()[0]; prompt = "Use only the supplied case evidence. Cite item IDs in brackets. State when evidence is insufficient.\n\n" + self.case_context() + "\n\nQUESTION\n" + self.ai_prompt.toPlainText()
-        self.ai_output.setPlainText("Analyzing locally…"); result = subprocess.run(["ollama", "run", model, prompt], capture_output=True, text=True, timeout=180)
-        self.ai_output.setPlainText(result.stdout or result.stderr)
+        self.ai_output.setPlainText("Analyzing locally… The interface remains available.")
+        self.ollama_process=QProcess(self); self.ollama_process.setProgram("ollama"); self.ollama_process.setArguments(["run",model,prompt])
+        self.ollama_process.finished.connect(self.ollama_finished); self.ollama_process.start()
+
+    def ollama_finished(self, code, status):
+        output=bytes(self.ollama_process.readAllStandardOutput()).decode("utf-8",errors="replace")
+        error=bytes(self.ollama_process.readAllStandardError()).decode("utf-8",errors="replace")
+        self.ai_output.setPlainText(output or error or f"Local AI exited with code {code}")
+
+    def shutdown(self):
+        if self.ollama_process and self.ollama_process.state()!=QProcess.ProcessState.NotRunning:
+            self.ollama_process.kill(); self.ollama_process.waitForFinished(2000)
+        self.store.case_keys.clear()
+        self.store.db.close()
