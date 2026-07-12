@@ -59,6 +59,7 @@ from command_intel import AdvancedCommandIntelPage
 
 
 STATE_FILE = Path.home() / ".local/state/telemetry/telemetry.json"
+APP_VERSION = "0.9.0"
 TELEMETRY_URL = "http://127.0.0.1:9090/telemetry"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
@@ -5666,7 +5667,7 @@ class CommandAppsPage(QWidget):
         )
         description.setWordWrap(True)
         description.setObjectName("muted")
-        details = QLabel("SOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: main\n• System authorization required")
+        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• github.com/ebfourie7-ops/Command-Centre\n• Branch: main\n• System authorization required")
         details.setObjectName("muted")
         details.setWordWrap(True)
         actions = QHBoxLayout()
@@ -6066,7 +6067,7 @@ class PaletteDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Command Centre")
+        self.setWindowTitle(f"Command Centre v{APP_VERSION}")
         if LOGO_FILE.exists():
             self.setWindowIcon(QIcon(str(LOGO_FILE)))
         self.resize(1280, 820)

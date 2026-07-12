@@ -54,6 +54,7 @@ Command Centre.desktop
 
 ## Versions
 
+- `v0.9` adds GitHub `main` updates, bundled Command Widget installation, local HTML previews, persistent agent chat history, and provider authentication controls.
 - `v0.1` is the preserved baseline before the integrated Command Intel case platform.
 - Current development is on the `main` branch.
 
