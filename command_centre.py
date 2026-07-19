@@ -35,6 +35,7 @@ from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -57,6 +58,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplashScreen,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -69,7 +71,7 @@ from PySide6.QtWidgets import (
 from command_intel import AdvancedCommandIntelPage
 
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.2.0"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
@@ -83,7 +85,6 @@ CONTROL_QUEUE_FILE = CONFIG_DIR / "control_queue.json"
 TOOL_STATE_FILE = CONFIG_DIR / "tool_library_state.json"
 SOFTWARE_HISTORY_FILE = CONFIG_DIR / "software_history.json"
 SYSTEM_EVENTS_DB = CONFIG_DIR / "system_events.db"
-CACHYOS_PACKAGE_CATALOG = Path("/usr/lib/cachyos-pi/pkglist.yaml")
 COMMANDOS_CURATED_CATALOG = {
     "Audio": [
         "strawberry", "lollypop", "audacious", "elisa", "kwave", "audacity", "ardour", "lmms",
@@ -160,10 +161,10 @@ CURATED_CATEGORY_DESCRIPTIONS = {
 }
 DEPLOYMENT_STATE_FILE = CONFIG_DIR / "deployment_state.json"
 APP_DIR = Path(__file__).resolve().parent
-DEVELOPMENT_LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
+DEVELOPMENT_LOGO_FILE = APP_DIR / "command-centre-icon.png"
 INSTALLED_LOGO_FILE = APP_DIR / "logo.png"
 LOGO_FILE = DEVELOPMENT_LOGO_FILE if DEVELOPMENT_LOGO_FILE.exists() else INSTALLED_LOGO_FILE
-SPLASH_FILE = Path.home() / "Desktop/splash screen.png"
+SPLASH_FILE = APP_DIR / "splash.png"
 INVENTORY_DIR = APP_DIR / "inventory"
 DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
 CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
@@ -171,6 +172,16 @@ FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
 FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
 RESOURCE_DIR = APP_DIR / "resources"
 COMMAND_WIDGET_DIR = RESOURCE_DIR / "command-widget"
+COMMAND_PDF_DIR = RESOURCE_DIR / "command-pdf"
+COMMAND_WIDGET_VERSION_FILE = COMMAND_WIDGET_DIR / "VERSION"
+COMMAND_WIDGET_VERSION = COMMAND_WIDGET_VERSION_FILE.read_text(encoding="utf-8").strip() if COMMAND_WIDGET_VERSION_FILE.is_file() else "Unknown"
+
+
+def safe_read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def harden_private_storage():
@@ -1645,6 +1656,18 @@ class SoftwarePage(QWidget):
         self.package_search.returnPressed.connect(self.search_packages)
         self.package_list = QListWidget()
         self.package_list.itemDoubleClicked.connect(lambda _: self.install_selected_package())
+        self.orphan_packages = []
+        self.foreign_packages = []
+        self.orphan_list = QListWidget()
+        self.orphan_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.foreign_list = QListWidget()
+        self.foreign_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.orphan_summary = QLabel("No orphan scan completed yet.")
+        self.orphan_summary.setObjectName("muted")
+        self.orphan_summary.setWordWrap(True)
+        self.foreign_summary = QLabel("No foreign-package scan completed yet.")
+        self.foreign_summary.setObjectName("muted")
+        self.foreign_summary.setWordWrap(True)
         self.kernel_status = QLabel("--")
         self.kernel_status.setObjectName("muted")
         self.available_kernels = QComboBox()
@@ -1662,6 +1685,7 @@ class SoftwarePage(QWidget):
         tabs.addTab(self.overview_panel(), "Overview")
         tabs.addTab(self.updates_page(), "Updates")
         tabs.addTab(self.package_panel(), "Packages")
+        tabs.addTab(self.package_cleanup_page(), "Orphans & Foreign")
         tabs.addTab(self.kernel_panel(), "Kernels")
         tabs.addTab(self.health_page(), "Health & Sources")
         tabs.addTab(self.history_page(), "History")
@@ -1871,6 +1895,54 @@ class SoftwarePage(QWidget):
         page_layout.addStretch(1)
         return page
 
+    def package_cleanup_page(self):
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 8, 4, 4)
+        grid = QGridLayout()
+
+        orphans, orphan_layout = self.panel("Orphan Packages")
+        orphan_help = QLabel("Dependencies that are no longer required by another installed package. Review them before removal; packages you still use can be marked as explicitly installed.")
+        orphan_help.setObjectName("muted")
+        orphan_help.setWordWrap(True)
+        orphan_layout.addWidget(orphan_help)
+        orphan_layout.addWidget(self.orphan_summary)
+        orphan_layout.addWidget(self.orphan_list, 1)
+        orphan_actions = QHBoxLayout()
+        for label, handler in [
+            ("Inspect", lambda: self.inspect_managed_packages(self.orphan_list)),
+            ("Keep Selected", self.keep_selected_orphans),
+            ("Remove Selected", self.remove_selected_orphans),
+            ("Remove All", self.remove_all_orphans),
+        ]:
+            button = QPushButton(label); button.clicked.connect(handler); orphan_actions.addWidget(button)
+        orphan_actions.addStretch(); orphan_layout.addLayout(orphan_actions)
+
+        foreign, foreign_layout = self.panel("Foreign Packages")
+        foreign_help = QLabel("Packages installed locally or from the AUR that are absent from configured repository databases. Foreign does not mean unsafe; inspect the source and decide whether to update, keep, or remove each package.")
+        foreign_help.setObjectName("muted")
+        foreign_help.setWordWrap(True)
+        foreign_layout.addWidget(foreign_help)
+        foreign_layout.addWidget(self.foreign_summary)
+        foreign_layout.addWidget(self.foreign_list, 1)
+        foreign_actions = QHBoxLayout()
+        for label, handler in [
+            ("Inspect", lambda: self.inspect_managed_packages(self.foreign_list)),
+            ("Update / Rebuild", self.update_selected_foreign),
+            ("Remove Selected", self.remove_selected_foreign),
+        ]:
+            button = QPushButton(label); button.clicked.connect(handler); foreign_actions.addWidget(button)
+        foreign_actions.addStretch(); foreign_layout.addLayout(foreign_actions)
+
+        grid.addWidget(orphans, 0, 0)
+        grid.addWidget(foreign, 0, 1)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
+        page_layout.addLayout(grid, 1)
+        refresh = QPushButton("Refresh Package Classification")
+        refresh.clicked.connect(self.refresh)
+        page_layout.addWidget(refresh, 0, Qt.AlignLeft)
+        return page
+
     def maintenance_panel(self):
         frame, layout = self.panel("Maintenance")
         body = QLabel("Prepare repair and cleanup actions in a terminal so privilege prompts and package confirmations stay visible.")
@@ -1958,7 +2030,23 @@ class SoftwarePage(QWidget):
         snapshot = state["snapshot"]
         self.snapshot_status.setText(f"BACKEND  {snapshot['backend']}\nCONFIGURATION  {'READY' if snapshot['configured'] else 'NOT READY'}\nROLLBACK  {'POTENTIALLY AVAILABLE' if snapshot['configured'] else 'NOT CONFIRMED'}\nRECOMMENDATION  {'CREATE SNAPSHOT BEFORE HIGH-IMPACT UPDATE' if high else 'OPTIONAL'}")
         self.health_status.setText(f"PACKAGE DATABASE     {'LOCKED' if state['lock'] != 'CLEAR' else 'ACCESSIBLE'}\nPACMAN LOCK          {state['lock']}\nPACKAGE CACHE        {state['cache']}\nORPHANS              {len(state['orphans'])}\nFOREIGN PACKAGES     {len(state['foreign'])}\nRUNNING KERNEL       {state['kernel']}")
-        self.sources_status.setText(f"PACMAN       {'AVAILABLE' if command_exists('pacman') else 'MISSING'}\nAUR HELPER   {('YAY' if command_exists('yay') else 'PARU' if command_exists('paru') else 'NONE')}\nFLATPAK      {'AVAILABLE' if command_exists('flatpak') else 'MISSING'}\nSNAPSHOTS    {snapshot['backend']} · {'READY' if snapshot['configured'] else 'NOT CONFIGURED'}")
+        commandos_repo = "ENABLED" if re.search(r"(?m)^\[commandos\]\s*$", safe_read_text("/etc/pacman.conf")) else "NOT CONFIGURED"
+        self.sources_status.setText(f"PACMAN       {'AVAILABLE' if command_exists('pacman') else 'MISSING'}\nCOMMANDOS    {commandos_repo}\nAUR HELPER   {('YAY' if command_exists('yay') else 'PARU' if command_exists('paru') else 'NONE')}\nFLATPAK      {'AVAILABLE' if command_exists('flatpak') else 'MISSING'}\nSNAPSHOTS    {snapshot['backend']} · {'READY' if snapshot['configured'] else 'NOT CONFIGURED'}")
+        self.orphan_packages = list(state["orphans"])
+        self.foreign_packages = list(state["foreign"])
+        self.orphan_list.clear()
+        self.orphan_list.addItems(self.orphan_packages)
+        self.foreign_list.clear()
+        self.foreign_list.addItems(self.foreign_packages)
+        self.orphan_summary.setText(
+            f"{len(self.orphan_packages)} orphan package(s) detected."
+            if self.orphan_packages else "No orphan packages detected."
+        )
+        aur_helper = "yay" if command_exists("yay") else "paru" if command_exists("paru") else "no AUR helper"
+        self.foreign_summary.setText(
+            f"{len(self.foreign_packages)} foreign package(s) detected · {aur_helper}."
+            if self.foreign_packages else "No foreign packages detected."
+        )
         self.update_list.clear()
         for record in sorted(self.update_records, key=lambda item: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[item["impact"]]):
             self.update_list.addItem(f"{record['name'].upper()}  ·  {record['impact']} IMPACT  ·  {record['source']}\n{record['current']} → {record['new']}\n{record['reason']}")
@@ -1969,7 +2057,7 @@ class SoftwarePage(QWidget):
         self.refresh_tools_status()
 
     def parse_update_records(self, rows, source):
-        high_names = {"linux", "linux-cachyos", "nvidia", "nvidia-utils", "mesa", "systemd", "glibc", "grub", "mkinitcpio", "btrfs-progs", "pacman", "linux-firmware"}
+        high_names = {"linux", "linux-commandos", "linux-commandos-lts", "nvidia", "nvidia-utils", "mesa", "systemd", "glibc", "grub", "mkinitcpio", "btrfs-progs", "pacman", "linux-firmware"}
         medium_prefixes = ("qt6-", "plasma-", "pipewire", "openssl", "python", "gcc")
         records = []
         for row in rows:
@@ -1985,6 +2073,87 @@ class SoftwarePage(QWidget):
                 impact, reason = "LOW", "Application or leaf-package update based on package-name classification."
             records.append({"name": name, "current": current, "new": new, "source": source, "impact": impact, "reason": reason})
         return records
+
+    def selected_managed_packages(self, widget):
+        packages = []
+        for item in widget.selectedItems():
+            try:
+                packages.append(validate_package(item.text().strip()))
+            except ActionValidationError:
+                continue
+        return packages
+
+    def inspect_managed_packages(self, widget):
+        packages = self.selected_managed_packages(widget)
+        if not packages:
+            self.result.setPlainText("Select one or more packages to inspect.")
+            return
+        sections = []
+        for package in packages[:25]:
+            output, error, code = run_text(["pacman", "-Qi", package], 6)
+            sections.append(output.strip() if code == 0 else f"{package}\n{error or 'Package information unavailable.'}")
+        self.result.setPlainText("\n\n".join(sections))
+
+    def remove_managed_packages(self, packages, category):
+        if not packages:
+            self.result.setPlainText(f"Select one or more {category.lower()} packages first.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        command = f"sudo pacman -Rns {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        warning = "Pacman will calculate and show the complete removal transaction in the terminal before confirmation."
+        if not confirm(self, f"Remove {category} Packages", f"Remove these packages?\n\n{review}\n\n{warning}\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command(f"Remove {category} Packages", command):
+            self.record_transaction(f"Remove {category.lower()} packages", command)
+            self.parent_window.add_history(f"{category} package removal started: {len(packages)} package(s)", category="UPDATE")
+
+    def remove_selected_orphans(self):
+        self.remove_managed_packages(self.selected_managed_packages(self.orphan_list), "Orphan")
+
+    def remove_all_orphans(self):
+        packages = []
+        for package in self.orphan_packages:
+            try:
+                packages.append(validate_package(package))
+            except ActionValidationError:
+                continue
+        self.remove_managed_packages(packages, "All Orphan")
+
+    def keep_selected_orphans(self):
+        packages = self.selected_managed_packages(self.orphan_list)
+        if not packages:
+            self.result.setPlainText("Select orphan packages to keep as explicitly installed.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        command = f"sudo pacman -D --asexplicit {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        if not confirm(self, "Keep Orphan Packages", f"Mark these packages as explicitly installed so they are no longer classified as orphans?\n\n{review}\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command("Keep Orphan Packages", command):
+            self.record_transaction("Mark orphan packages explicit", command)
+            self.parent_window.add_history(f"Marked {len(packages)} orphan package(s) as explicit", category="UPDATE")
+
+    def remove_selected_foreign(self):
+        self.remove_managed_packages(self.selected_managed_packages(self.foreign_list), "Foreign")
+
+    def update_selected_foreign(self):
+        packages = self.selected_managed_packages(self.foreign_list)
+        if not packages:
+            self.result.setPlainText("Select foreign packages to update or rebuild.")
+            return
+        helper = "yay" if command_exists("yay") else "paru" if command_exists("paru") else ""
+        if not helper:
+            self.result.setPlainText("No AUR helper is available. Foreign packages can still be inspected or removed; locally built packages must be rebuilt from their original source.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        command = f"{helper} -S --needed {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        if not confirm(self, "Update Foreign Packages", f"Ask {helper} to update or rebuild these packages?\n\n{review}\n\nPackages unavailable from the AUR will be reported without being changed.\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command("Update Foreign Packages", command):
+            self.record_transaction("Update selected foreign packages", command)
+            self.parent_window.add_history(f"Foreign package update started: {len(packages)} package(s)", category="UPDATE")
 
     def show_update_review(self):
         if not self.update_records:
@@ -2284,13 +2453,6 @@ class SoftwarePage(QWidget):
         if self.terminal_command("Update GRUB", command):
             self.record_transaction("Regenerate GRUB configuration", command)
             self.parent_window.add_history("GRUB update started")
-
-    def install_kernel_gui(self):
-        command = self.package_install_command("cachyos-kernel-manager")
-        if not confirm(self, "Install CachyOS Kernel Manager", f"Install the CachyOS Kernel Manager GUI?\n\nCommand:\n{command}"):
-            return
-        if self.terminal_command("Install CachyOS Kernel Manager", command):
-            self.parent_window.add_history("CachyOS Kernel Manager install started")
 
     def update_command(self):
         if command_exists("yay"):
@@ -6016,7 +6178,7 @@ class DeploymentPage(QWidget):
             "schema_version": 1,
             "system_profiles": [{
                 "id": "commandos_workstation", "name": "CommandOS Workstation", "revision": 1,
-                "type": "system_profile", "required_packages": ["base", "linux-cachyos"],
+                "type": "system_profile", "required_packages": ["base", "linux-commandos", "commandos-hooks", "commandos-settings"],
                 "optional_packages": ["plasma-meta", "command-centre"], "services": [],
                 "tool_collections": ["commandos-base"], "policies": {"release_channel": "development"},
             }],
@@ -6618,6 +6780,20 @@ class CommandAppsPage(QWidget):
         self.widget_install = QPushButton("Install")
         self.widget_install.setObjectName("primaryButton")
         self.widget_install.clicked.connect(self.install_command_widget)
+        self.installer_status = QLabel("Checking installer components…")
+        self.installer_status.setObjectName("muted")
+        self.hello_button = QPushButton("OPEN COMMAND HELLO")
+        self.hello_button.setObjectName("primaryButton")
+        self.hello_button.clicked.connect(self.launch_command_hello)
+        self.pdf_status = QLabel("Checking Command PDF…")
+        self.pdf_status.setObjectName("muted")
+        self.pdf_install = QPushButton("Install")
+        self.pdf_install.setObjectName("primaryButton")
+        self.pdf_install.clicked.connect(self.install_command_pdf)
+        self.pdf_open = QPushButton("Open")
+        self.pdf_open.clicked.connect(self.open_command_pdf)
+        self.pdf_remove = QPushButton("Uninstall")
+        self.pdf_remove.clicked.connect(self.uninstall_command_pdf)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setObjectName("textPanel")
@@ -6640,7 +6816,8 @@ class CommandAppsPage(QWidget):
         cards = QGridLayout()
         cards.addWidget(self.command_widget_card(), 0, 0)
         cards.addWidget(self.installer_card(), 0, 1)
-        cards.addWidget(self.command_centre_update_card(), 1, 0, 1, 2)
+        cards.addWidget(self.command_pdf_card(), 1, 0, 1, 2)
+        cards.addWidget(self.command_centre_update_card(), 2, 0, 1, 2)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
 
@@ -6665,7 +6842,7 @@ class CommandAppsPage(QWidget):
         return frame, layout
 
     def command_widget_card(self):
-        frame, layout = self.panel("CW   Command Widget")
+        frame, layout = self.panel(f"CW   Command Widget · v{COMMAND_WIDGET_VERSION}")
         description = QLabel(
             "A KDE Plasma 6 system telemetry widget for CommandOS. It displays power mode, CPU, memory, GPU, storage, fans, network, VPN, and battery status."
         )
@@ -6688,31 +6865,88 @@ class CommandAppsPage(QWidget):
         return frame
 
     def installer_card(self):
-        frame, layout = self.panel("CI   CommandOS Installer")
+        frame, layout = self.panel("CH   Command Hello & Installers")
         description = QLabel(
-            "The planned graphical installer for deploying CommandOS to physical computers and virtual machines."
+            "Start the CommandOS welcome experience, guided graphical installer, or advanced terminal installer. Destructive installation steps remain inside the installers and require explicit confirmation."
         )
         description.setWordWrap(True)
         description.setObjectName("muted")
-        features = QLabel("PLANNED\n• Guided disk setup\n• User and locale configuration\n• CommandOS profile selection\n• Offline installation support")
+        features = QLabel("AVAILABLE\n• Command Hello live welcome\n• Guided Calamares installation\n• Advanced terminal installation\n• CommandOS kernels, hooks, settings and keyring")
         features.setObjectName("muted")
-        placeholder = QLabel("COMING SOON · PLACEHOLDER")
-        placeholder.setObjectName("muted")
-        button = QPushButton("Not available yet")
-        button.setDisabled(True)
+        actions = QHBoxLayout()
+        graphical = QPushButton("Graphical Installer")
+        graphical.clicked.connect(self.launch_graphical_installer)
+        cli = QPushButton("CLI Installer")
+        cli.clicked.connect(self.launch_cli_installer)
+        actions.addWidget(self.hello_button)
+        actions.addWidget(graphical)
+        actions.addWidget(cli)
+        actions.addStretch()
         layout.addWidget(description)
         layout.addWidget(features)
         layout.addStretch()
-        layout.addWidget(placeholder)
-        layout.addWidget(button)
+        layout.addWidget(self.installer_status)
+        layout.addLayout(actions)
         return frame
+
+    def command_pdf_card(self):
+        frame, layout = self.panel("CP   Command PDF")
+        description = QLabel(
+            "Read, convert, edit, and visibly sign PDF documents with a private, local-first CommandOS application."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        features = QLabel("INCLUDES\n• Native PDF viewer and trackpad gestures\n• Text boxes, page edits and visible signatures\n• PDF to DOCX, images and text\n• Drag-and-drop opening and PDF merging")
+        features.setObjectName("muted")
+        features.setWordWrap(True)
+        actions = QHBoxLayout()
+        actions.addWidget(self.pdf_install)
+        actions.addWidget(self.pdf_open)
+        actions.addWidget(self.pdf_remove)
+        actions.addStretch()
+        layout.addWidget(description)
+        layout.addWidget(features)
+        layout.addStretch()
+        layout.addWidget(self.pdf_status)
+        layout.addLayout(actions)
+        return frame
+
+    def launch_command_hello(self):
+        if not command_exists("command-hello"):
+            QMessageBox.warning(self, "Command Hello", "commandos-hello is not installed.")
+            return
+        subprocess.Popen(["command-hello"], start_new_session=True)
+        self.parent_window.add_history("Command Hello opened", category="APPLICATION")
+
+    def launch_graphical_installer(self):
+        launcher = Path("/usr/local/bin/calamares-online.sh")
+        if launcher.is_file():
+            command = shlex.quote(str(launcher))
+        elif command_exists("calamares"):
+            command = "pkexec calamares -D6"
+        else:
+            QMessageBox.warning(self, "CommandOS Installer", "commandos-calamares is not installed.")
+            return
+        if not confirm(self, "Launch Graphical Installer", "Open the CommandOS graphical installer?\n\nDisk changes are made only after review and confirmation inside Calamares."):
+            return
+        ok, detail = launch_terminal("CommandOS Graphical Installer", command)
+        self.output.setPlainText("Graphical installer launched." if ok else detail)
+
+    def launch_cli_installer(self):
+        if not command_exists("commandos-installer"):
+            QMessageBox.warning(self, "CommandOS CLI Installer", "commandos-cli-installer is not installed.")
+            return
+        if not confirm(self, "Launch CLI Installer", "Open the advanced CommandOS terminal installer?\n\nReview every storage action carefully before applying it."):
+            return
+        ok, detail = launch_terminal("CommandOS CLI Installer", "sudo commandos-installer")
+        self.output.setPlainText("CLI installer launched." if ok else detail)
 
     def command_centre_update_card(self):
         frame, layout = self.panel("CC   Command Centre Update")
-        description = QLabel("Update from the signed public Command Centre repository. The updater verifies the repository key and configures pacman when needed.")
+        description = QLabel("Update from the signed public CommandOS repository on SourceForge. The updater verifies the repository key and configures pacman when needed.")
         description.setWordWrap(True)
         description.setObjectName("muted")
-        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• Signed public Arch repository\n• Command-Centre-v1.0.1\n• System authorization required")
+        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• Signed [commandos] repository\n• linux-commandos.sourceforge.io\n• System authorization required")
         details.setObjectName("muted")
         details.setWordWrap(True)
         actions = QHBoxLayout()
@@ -6720,7 +6954,7 @@ class CommandAppsPage(QWidget):
         self.command_centre_update.setObjectName("primaryButton")
         self.command_centre_update.clicked.connect(self.update_command_centre)
         repository = QPushButton("Open Repository")
-        repository.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/ebfourie7-ops/Command-Centre")))
+        repository.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://sourceforge.net/projects/linux-commandos/")))
         actions.addWidget(self.command_centre_update)
         actions.addWidget(repository)
         actions.addStretch()
@@ -6758,6 +6992,9 @@ class CommandAppsPage(QWidget):
         http_daemon = Path.home() / ".local/bin/telemetry-http-daemon"
         return widget.exists() and daemon.exists() and http_daemon.exists()
 
+    def command_pdf_installed(self):
+        return (Path.home() / ".local/share/command-pdf/command_pdf.py").is_file() and (Path.home() / ".local/bin/command-pdf").exists()
+
     def refresh(self):
         installed = self.widget_installed()
         source_ready = (COMMAND_WIDGET_DIR / "install.sh").exists()
@@ -6771,6 +7008,74 @@ class CommandAppsPage(QWidget):
             self.widget_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
             self.widget_install.setText("Install unavailable")
         self.widget_install.setEnabled(source_ready)
+        components = {
+            "Command Hello": command_exists("command-hello"),
+            "Calamares": command_exists("calamares"),
+            "CLI installer": command_exists("commandos-installer"),
+        }
+        self.installer_status.setText("  ·  ".join(f"{'●' if ready else '○'} {name} {'READY' if ready else 'MISSING'}" for name, ready in components.items()))
+        self.hello_button.setEnabled(components["Command Hello"])
+        pdf_ready = (COMMAND_PDF_DIR / "install.sh").is_file()
+        pdf_installed = self.command_pdf_installed()
+        if pdf_installed:
+            self.pdf_status.setText("● INSTALLED · User-local Command PDF application is ready")
+            self.pdf_install.setText("Reinstall / Update")
+        elif pdf_ready:
+            self.pdf_status.setText("○ AVAILABLE · Installer included with Command Centre")
+            self.pdf_install.setText("Install")
+        else:
+            self.pdf_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
+            self.pdf_install.setText("Install unavailable")
+        self.pdf_install.setEnabled(pdf_ready)
+        self.pdf_open.setEnabled(pdf_installed or command_exists("command-pdf"))
+        self.pdf_remove.setEnabled(pdf_installed)
+
+    def install_command_pdf(self):
+        installer = COMMAND_PDF_DIR / "install.sh"
+        if not installer.is_file():
+            QMessageBox.warning(self, "Command PDF", f"Installer not found:\n{installer}")
+            return
+        action = "update" if self.command_pdf_installed() else "install"
+        if not confirm(self, f"{action.title()} Command PDF", "Install Command PDF for your user account?\n\nThe app is stored under ~/.local and its Python dependencies are isolated in a private environment."):
+            return
+        self.pdf_install.setEnabled(False)
+        self.output.setPlainText(f"Running Command PDF {action}…")
+        QApplication.processEvents()
+        try:
+            result = subprocess.run(["/bin/bash", str(installer)], cwd=str(COMMAND_PDF_DIR), check=False, capture_output=True, text=True, timeout=300)
+            message = (result.stdout + "\n" + result.stderr).strip()
+        except subprocess.TimeoutExpired:
+            result = None
+            message = "Installation timed out while preparing the local Python environment."
+        self.output.setPlainText(message)
+        if result is not None and result.returncode == 0:
+            self.parent_window.add_history(f"Command PDF {action} completed", category="APPLICATION")
+            QMessageBox.information(self, "Command PDF", f"Command PDF {action} completed successfully.")
+        else:
+            QMessageBox.warning(self, "Command PDF", message[-1400:])
+        self.refresh()
+
+    def open_command_pdf(self):
+        executable = Path.home() / ".local/bin/command-pdf"
+        command = str(executable) if executable.exists() else shutil.which("command-pdf")
+        if not command:
+            QMessageBox.warning(self, "Command PDF", "Command PDF is not installed.")
+            return
+        subprocess.Popen([command], start_new_session=True)
+        self.parent_window.add_history("Command PDF opened", category="APPLICATION")
+
+    def uninstall_command_pdf(self):
+        uninstaller = COMMAND_PDF_DIR / "uninstall.sh"
+        if not uninstaller.is_file() or not confirm(self, "Uninstall Command PDF", "Remove the user-local Command PDF installation?\n\nYour PDF documents will not be removed."):
+            return
+        result = subprocess.run(["/bin/bash", str(uninstaller)], cwd=str(COMMAND_PDF_DIR), check=False, capture_output=True, text=True, timeout=60)
+        message = (result.stdout + "\n" + result.stderr).strip()
+        self.output.setPlainText(message)
+        if result.returncode == 0:
+            self.parent_window.add_history("Command PDF uninstalled", category="APPLICATION")
+        else:
+            QMessageBox.warning(self, "Command PDF", message[-1400:])
+        self.refresh()
 
     def install_command_widget(self):
         installer = COMMAND_WIDGET_DIR / "install.sh"
@@ -7688,6 +7993,19 @@ def main():
         app.setDesktopFileName("command-centre")
     if LOGO_FILE.exists():
         app.setWindowIcon(QIcon(str(LOGO_FILE)))
+    splash = None
+    if SPLASH_FILE.is_file():
+        splash_pixmap = QPixmap(str(SPLASH_FILE))
+        if not splash_pixmap.isNull():
+            splash_pixmap = splash_pixmap.scaled(
+                1200,
+                800,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            splash = QSplashScreen(splash_pixmap)
+            splash.show()
+            app.processEvents()
     app.setStyleSheet(
         """
         QWidget {
@@ -8023,6 +8341,8 @@ def main():
     if primary_screen:
         window.setGeometry(primary_screen.availableGeometry())
     window.showMaximized()
+    if splash is not None:
+        splash.finish(window)
     sys.exit(app.exec())
 
 

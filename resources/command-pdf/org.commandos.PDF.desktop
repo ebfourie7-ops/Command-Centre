@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Command PDF
+GenericName=PDF Editor
+Comment=Read, convert, edit, and visibly sign PDF documents
+Exec=command-pdf %f
+Icon=org.commandos.PDF
+Terminal=false
+Categories=Office;
+MimeType=application/pdf;
+Keywords=PDF;Read;Convert;Edit;Sign;
+StartupNotify=true
+StartupWMClass=org.commandos.PDF
