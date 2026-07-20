@@ -2,6 +2,7 @@
 import json
 import html
 import hashlib
+import math
 import os
 import re
 import signal
@@ -29,7 +30,7 @@ from core.config_schema import ConfigValidationError, validate_agent_config, val
 from core.events import SystemEventStore
 from core.telemetry import read_telemetry
 
-from PySide6.QtCore import QFileSystemWatcher, QPointF, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
+from PySide6.QtCore import QFileSystemWatcher, QPointF, QSize, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -61,8 +62,10 @@ from PySide6.QtWidgets import (
     QSplashScreen,
     QSplitter,
     QStackedWidget,
+    QStyle,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -71,7 +74,7 @@ from PySide6.QtWidgets import (
 from command_intel import AdvancedCommandIntelPage
 
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.0.5"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
@@ -528,10 +531,11 @@ class MetricCard(QFrame):
 
 
 class CockpitCard(QFrame):
-    def __init__(self, title):
+    def __init__(self, title, icon="◇", accent="#00AEEF"):
         super().__init__()
         self.setObjectName("card")
-        self.title = QLabel(title)
+        self.setProperty("accent", accent)
+        self.title = QLabel(f"{icon}   {title}")
         self.title.setObjectName("panelTitle")
         self.body = QLabel("--")
         self.body.setObjectName("muted")
@@ -541,6 +545,8 @@ class CockpitCard(QFrame):
         self.click_handler = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 7, 12, 7)
+        layout.setSpacing(4)
         self.content_layout = layout
         layout.addWidget(self.title)
         layout.addWidget(self.body)
@@ -602,13 +608,79 @@ class Sparkline(QWidget):
             painter.drawPolyline(QPolygonF(segment))
 
 
+class RadarWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self.setFixedSize(220, 94)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.advance)
+        self.timer.start(50)
+
+    def advance(self):
+        self.angle = (self.angle + 2) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        center = QPointF(50, 47)
+        painter.setPen(QPen(QColor("#164968"), 1))
+        for radius in (18, 34, 47):
+            painter.drawEllipse(center, radius, radius)
+        painter.drawLine(3, 47, 97, 47)
+        painter.drawLine(50, 0, 50, 94)
+        radians = self.angle * 3.14159265 / 180
+        endpoint = QPointF(center.x() + 47 * math.cos(radians), center.y() - 47 * math.sin(radians))
+        painter.setPen(QPen(QColor("#00AEEF"), 2))
+        painter.drawLine(center, endpoint)
+        painter.setBrush(QColor("#35D66B"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(76, 30), 2.5, 2.5)
+        painter.setPen(QColor("#E9F3FB"))
+        painter.setFont(QFont("Inter", 18, QFont.Bold))
+        painter.drawText(108, 35, time.strftime("%H:%M"))
+        painter.setFont(QFont("Inter", 9, QFont.DemiBold))
+        painter.setPen(QColor("#B5BDC6"))
+        painter.drawText(108, 55, time.strftime("%d %b %Y").upper())
+        painter.drawText(108, 73, "CAPE TOWN")
+
+
+class ReadinessGauge(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.score = 0
+        self.setFixedSize(142, 142)
+
+    def set_score(self, score):
+        self.score = max(0, min(100, int(score)))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(12, 12, -12, -12)
+        painter.setPen(QPen(QColor("#16344D"), 10))
+        painter.drawArc(rect, 0, 360 * 16)
+        color = QColor("#35D66B" if self.score >= 85 else "#00AEEF" if self.score >= 70 else "#F4B942")
+        painter.setPen(QPen(color, 10, Qt.SolidLine, Qt.RoundCap))
+        painter.drawArc(rect, 90 * 16, -int(360 * 16 * self.score / 100))
+        painter.setPen(QColor("#F4F7FA"))
+        painter.setFont(QFont("Inter", 29, QFont.Bold))
+        painter.drawText(0, 39, self.width(), 42, Qt.AlignCenter, f"{self.score}%")
+        painter.setPen(QColor("#B5BDC6"))
+        painter.setFont(QFont("Inter", 9, QFont.DemiBold))
+        painter.drawText(0, 78, self.width(), 25, Qt.AlignCenter, "MISSION READY")
+
+
 class TelemetryCard(QFrame):
-    def __init__(self, title, color="#49bfff"):
+    def __init__(self, title, color="#49bfff", icon="◈"):
         super().__init__()
         self.setObjectName("card")
-        self.setMaximumHeight(246)
+        self.setMaximumHeight(180)
         self.click_handler = None
-        self.title = QLabel(title)
+        self.setProperty("accent", color)
+        self.title = QLabel(f"{icon}   {title}")
         self.title.setObjectName("panelTitle")
         self.value = QLabel("--")
         self.value.setObjectName("metricValue")
@@ -616,20 +688,28 @@ class TelemetryCard(QFrame):
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.usage_bar = QProgressBar()
+        self.usage_bar.setObjectName("metricBar")
+        self.usage_bar.setProperty("accent", color)
+        self.usage_bar.setRange(0, 100)
+        self.usage_bar.setTextVisible(False)
+        self.usage_bar.setFixedHeight(7)
         self.sparkline = Sparkline(color)
-        self.sparkline.setMinimumHeight(41)
-        self.sparkline.setMaximumHeight(41)
+        self.sparkline.setMinimumHeight(22)
+        self.sparkline.setMaximumHeight(22)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 7, 12, 7)
+        layout.setSpacing(3)
         layout.addWidget(self.title)
         layout.addWidget(self.value)
+        layout.addWidget(self.usage_bar)
         layout.addWidget(self.detail)
         layout.addWidget(self.sparkline)
 
     def set_metric(self, value, detail, history_value):
         self.value.setText(value)
         self.detail.setText(detail)
+        self.usage_bar.setValue(max(0, min(100, int(float(history_value or 0)))))
         self.sparkline.add_value(history_value)
 
     def set_click_handler(self, handler):
@@ -649,17 +729,27 @@ class DashboardPage(QWidget):
         self.parent_window = parent_window
         self.last_telemetry_timestamp = None
         self.header = QLabel("--")
-        self.header.setObjectName("healthHeader")
+        self.header.setObjectName("heroStatus")
         self.header.setWordWrap(True)
         self.header.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
-        self.cpu = TelemetryCard("CPU", "#49bfff")
-        self.gpu = TelemetryCard("GPU", "#ad7cff")
-        self.memory = TelemetryCard("MEMORY", "#42d989")
-        self.storage_summary = TelemetryCard("STORAGE", "#f0b84b")
-        self.health = CockpitCard("SYSTEM HEALTH")
+        self.cpu = TelemetryCard("CPU", "#00AEEF", "▣")
+        self.gpu = TelemetryCard("GPU", "#35D66B", "▤")
+        self.memory = TelemetryCard("MEMORY", "#A55DFF", "▥")
+        self.storage_summary = TelemetryCard("STORAGE", "#F0B230", "▧")
+        self.health = CockpitCard("SYSTEM HEALTH", "♥", "#35D66B")
         self.health.setMaximumHeight(150)
-        self.readiness = CockpitCard("COMMANDOS READINESS")
+        self.readiness = CockpitCard("COMMAND STATUS", "◎", "#00AEEF")
+        self.readiness.setMinimumHeight(245)
+        self.readiness.setMaximumHeight(260)
+        self.readiness_gauge = ReadinessGauge()
+        self.readiness.content_layout.removeWidget(self.readiness.body)
+        readiness_content = QHBoxLayout()
+        readiness_content.setSpacing(18)
+        readiness_content.addWidget(self.readiness_gauge)
+        readiness_content.addWidget(self.readiness.body, 1)
+        self.readiness.body.setObjectName("readinessDetail")
+        self.readiness.content_layout.addLayout(readiness_content)
         self.readiness_bar = QProgressBar()
         self.readiness_bar.setRange(0, 100)
         self.readiness_bar.setTextVisible(True)
@@ -667,33 +757,56 @@ class DashboardPage(QWidget):
         readiness_details = QPushButton("VIEW SCORE BREAKDOWN")
         readiness_details.clicked.connect(self.show_readiness_breakdown)
         self.readiness.content_layout.addWidget(readiness_details)
-        self.power = CockpitCard("BATTERY & POWER")
-        self.network = CockpitCard("NETWORK HEALTH")
-        self.security = CockpitCard("SECURITY POSTURE")
-        self.storage_health = CockpitCard("DISK & SNAPSHOT HEALTH")
-        self.kernel_state = CockpitCard("KERNEL & DRIVER STATE")
+        self.intelligence = CockpitCard("COMMAND INTELLIGENCE", "✦", "#A55DFF")
+        self.intelligence.setMinimumHeight(245)
+        self.intelligence.setMaximumHeight(260)
+        self.intelligence.body.setTextFormat(Qt.RichText)
+        self.power = CockpitCard("BATTERY & POWER", "▥", "#35D66B")
+        self.network = CockpitCard("NETWORK HEALTH", "≋", "#00AEEF")
+        self.security = CockpitCard("SECURITY POSTURE", "◆", "#35D66B")
+        self.storage_health = CockpitCard("DISK & SNAPSHOT HEALTH", "▨", "#00AEEF")
+        self.kernel_state = CockpitCard("KERNEL & DRIVER STATE", ">_", "#8CB7D7")
         for card in (self.power, self.network, self.security, self.storage_health, self.kernel_state):
-            card.setMaximumHeight(140)
-        self.activity = CockpitCard("RECENT ACTIVITY")
-        self.activity.setMinimumHeight(180)
+            card.setMinimumHeight(112)
+            card.setMaximumHeight(122)
+        self.activity = CockpitCard("RECENT ACTIVITY", "◷", "#00AEEF")
+        self.activity.setMinimumHeight(301)
+        self.activity.content_layout.removeWidget(self.activity.body)
+        self.activity.body.hide()
+        self.activity_rows = QVBoxLayout()
+        self.activity_rows.setSpacing(3)
+        self.activity.content_layout.addLayout(self.activity_rows)
         timeline_button = QPushButton("VIEW FULL SYSTEM TIMELINE")
         timeline_button.clicked.connect(self.parent_window.show_system_timeline)
         self.activity.content_layout.addWidget(timeline_button)
-        self.alerts_frame, self.alerts_layout = self.panel("ALERTS & RECOMMENDATIONS")
-        self.alerts_frame.setMinimumHeight(210)
+        self.alerts_frame, self.alerts_layout = self.panel("⚠   ALERTS & RECOMMENDATIONS")
+        self.alerts_frame.setMinimumHeight(150)
+        self.alerts_frame.setMaximumHeight(160)
+        self.alerts_layout.setContentsMargins(12, 7, 12, 7)
+        self.alerts_layout.setSpacing(4)
         self.alerts_details = QPushButton("OPEN ACTION CENTRE")
+        self.alerts_details.setObjectName("alertAction")
+        self.alerts_details.setFixedHeight(22)
         self.alerts_details.clicked.connect(lambda: self.open_detail("alerts"))
-        self.quick_frame, quick_layout = self.panel("QUICK ACTIONS")
+        self.quick_frame, quick_layout = self.panel("◈   QUICK ACTIONS")
+        self.quick_frame.setMaximumHeight(130)
         actions = QGridLayout()
-        for index, (label, callback) in enumerate([
-            ("CHECK UPDATES", lambda: self.parent_window.open_module("software")),
-            ("OPEN TERMINAL", lambda: self.parent_window.open_module("command_code")),
-            ("SYSTEM INFORMATION", self.open_system_information),
-            ("TELEMETRY STATUS", self.show_telemetry_status),
+        actions.setSpacing(8)
+        for index, (label, standard_icon, callback) in enumerate([
+            ("CHECK UPDATES", QStyle.SP_BrowserReload, lambda: self.parent_window.open_module("software")),
+            ("OPEN TERMINAL", QStyle.SP_ComputerIcon, lambda: self.parent_window.open_module("command_code")),
+            ("SYSTEM INFORMATION", QStyle.SP_MessageBoxInformation, self.open_system_information),
+            ("TELEMETRY STATUS", QStyle.SP_DriveNetIcon, self.show_telemetry_status),
         ]):
-            button = QPushButton(label)
+            button = QToolButton()
+            button.setText(label)
+            button.setObjectName("quickActionButton")
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setIcon(self.style().standardIcon(standard_icon))
+            button.setIconSize(QSize(28, 28))
+            button.setMinimumHeight(62)
             button.clicked.connect(callback)
-            actions.addWidget(button, index // 2, index % 2)
+            actions.addWidget(button, 0, index)
         quick_layout.addLayout(actions)
 
         for key, card in {
@@ -706,10 +819,14 @@ class DashboardPage(QWidget):
             card.set_click_handler(lambda selected=key: self.open_detail(selected))
 
         metrics = QGridLayout()
+        metrics.setHorizontalSpacing(11)
+        metrics.setVerticalSpacing(11)
         for index, card in enumerate([self.cpu, self.gpu, self.memory, self.storage_summary]):
             metrics.addWidget(card, 0, index)
 
         status_grid = QGridLayout()
+        status_grid.setHorizontalSpacing(11)
+        status_grid.setVerticalSpacing(11)
         status_grid.addWidget(self.power, 0, 0)
         status_grid.addWidget(self.network, 0, 1)
         status_grid.addWidget(self.kernel_state, 0, 2)
@@ -719,30 +836,37 @@ class DashboardPage(QWidget):
         for column in range(3):
             status_grid.setColumnStretch(column, 1)
 
-        readiness_alerts = QGridLayout()
-        readiness_alerts.addWidget(self.readiness, 0, 0)
-        readiness_alerts.addWidget(self.alerts_frame, 0, 1)
-        readiness_alerts.setColumnStretch(0, 1)
-        readiness_alerts.setColumnStretch(1, 1)
+        command_overview = QGridLayout()
+        command_overview.setHorizontalSpacing(11)
+        command_overview.addWidget(self.readiness, 0, 0)
+        command_overview.addWidget(self.intelligence, 0, 1)
+        command_overview.setColumnStretch(0, 2)
+        command_overview.setColumnStretch(1, 1)
 
-        bottom = QGridLayout()
-        bottom.addWidget(self.activity, 0, 0)
-        bottom.addWidget(self.quick_frame, 0, 1)
-        bottom.setColumnStretch(0, 1)
-        bottom.setColumnStretch(1, 1)
+        lower_console = QGridLayout()
+        lower_console.setHorizontalSpacing(11)
+        lower_console.setVerticalSpacing(11)
+        lower_console.addWidget(self.activity, 0, 0, 2, 1)
+        lower_console.addWidget(self.alerts_frame, 0, 1)
+        lower_console.addWidget(self.quick_frame, 1, 1)
+        lower_console.setColumnStretch(0, 1)
+        lower_console.setColumnStretch(1, 1)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(14)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(11)
         layout.addWidget(self.hero_panel())
+        layout.addLayout(command_overview)
         layout.addLayout(metrics)
         layout.addLayout(status_grid)
-        layout.addLayout(readiness_alerts, 1)
-        layout.addLayout(bottom, 1)
+        layout.addLayout(lower_console, 1)
 
     def panel(self, title):
         frame = QFrame()
         frame.setObjectName("card")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(7)
         heading = QLabel(title)
         heading.setObjectName("panelTitle")
         layout.addWidget(heading)
@@ -752,22 +876,41 @@ class DashboardPage(QWidget):
         frame = QFrame()
         frame.setObjectName("hero")
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(18, 9, 18, 9)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 7, 16, 7)
+        layout.setSpacing(4)
 
         copy = QVBoxLayout()
-        eyebrow = QLabel("COMMAND CENTRE")
+        eyebrow = QLabel("⌖  WELCOME, COMMANDER")
         eyebrow.setObjectName("heroEyebrow")
         title = QLabel("COMMAND OS")
         title.setObjectName("heroTitle")
-        subtitle = QLabel("ONE SYSTEM, ONE MISSION")
+        subtitle = QLabel("ONE SYSTEM  •  ONE MISSION")
         subtitle.setObjectName("heroSubtitle")
         copy.addWidget(eyebrow)
         copy.addWidget(title)
         copy.addWidget(subtitle)
-        copy.addWidget(self.header)
+        self.mission_status = QHBoxLayout()
+        self.mission_status.setSpacing(7)
+        self.status_labels = {}
+        for key, text, state in [
+            ("system", "●  SYSTEM\nCHECKING", "warning"),
+            ("power", "⚡  POWER\nCHECKING", "success"),
+            ("uptime", "◷  UPTIME\n--", "info"),
+            ("updates", "↑  UPDATES\n--", "info"),
+            ("telemetry", "●  TELEMETRY\nCHECKING", "success"),
+            ("vpn", "◆  VPN\nCHECKING", "info"),
+            ("battery", "▥  BATTERY\nCHECKING", "success"),
+        ]:
+            label = QLabel(text)
+            label.setObjectName("missionChip")
+            label.setProperty("state", state)
+            self.status_labels[key] = label
+            self.mission_status.addWidget(label)
+        self.mission_status.addStretch()
+        copy.addLayout(self.mission_status)
 
         layout.addLayout(copy, 1)
+        layout.addWidget(RadarWidget())
         return frame
 
     def refresh(self, data, system):
@@ -785,10 +928,17 @@ class DashboardPage(QWidget):
         updates = system.get("updates")
         updates_text = "updates unknown" if updates is None else f"{updates} updates"
         telemetry_state = "LIVE" if data else "UNAVAILABLE"
-        self.header.setText(
-            f"SYSTEM  {health}   ·   POWER  {metric_value(data, 'power_profile_label', 'Unknown').upper()}   ·   "
-            f"UPTIME  {system.get('uptime', '--').replace('up ', '').upper()}   ·   {updates_text.upper()}   ·   TELEMETRY  {telemetry_state}"
-        )
+        self.status_labels["system"].setText(f"●  SYSTEM\n{health}")
+        self.status_labels["power"].setText(f"⚡  POWER\n{metric_value(data, 'power_profile_label', 'Unknown').upper()}")
+        self.status_labels["uptime"].setText(f"◷  UPTIME\n{system.get('uptime', '--').replace('up ', '').upper()}")
+        self.status_labels["updates"].setText(f"↑  UPDATES\n{updates_text.upper()}")
+        self.status_labels["telemetry"].setText(f"●  TELEMETRY\n{telemetry_state}")
+        self.status_labels["vpn"].setText(f"◆  VPN\n{str(data.get('vpn_status', 'UNKNOWN')).upper()}")
+        self.status_labels["battery"].setText(f"▥  BATTERY\n{data.get('battery_percent', '--')}%")
+        self.status_labels["system"].setProperty("state", "success" if health == "HEALTHY" else "critical" if health == "CRITICAL" else "warning")
+        for label in self.status_labels.values():
+            label.style().unpolish(label)
+            label.style().polish(label)
 
         self.cpu.set_metric(
             f"{float(data.get('cpu_usage') or 0):.1f}%",
@@ -818,8 +968,10 @@ class DashboardPage(QWidget):
         self.health.set_text("\n".join(self.health_lines(data, system)))
         score, deductions, readiness = self.readiness_result(data, system)
         self.readiness_bar.setValue(score)
+        self.readiness_gauge.set_score(score)
         self.readiness.set_text("\n".join(readiness))
         self.readiness_deductions = deductions
+        self.intelligence.set_text(self.intelligence_summary(data, system, issues))
         battery = system.get("battery", {})
         self.power.set_text(
             f"{data.get('battery_percent', '--')}% · {battery.get('status', data.get('battery_status', 'Unknown'))}\n"
@@ -841,12 +993,76 @@ class DashboardPage(QWidget):
             f"Root {data.get('storage_percent', '--')}% · {system.get('storage_health', 'Unknown')}\n"
             f"Snapshots {system.get('snapshot', 'Unavailable')}\nFilesystem {system.get('filesystem', 'Unknown')}"
         )
+        boot_time = str(system.get("boot_time", "--"))
+        boot_total = re.search(r"=\s*(.+)$", boot_time)
+        boot_summary = boot_total.group(1) if boot_total else boot_time
         self.kernel_state.set_text(
             f"Kernel {system.get('kernel', '--')}\nNVIDIA {system.get('gpu_driver', 'not detected')} · {system.get('gpu_state', 'unknown')}\n"
-            f"Boot {system.get('boot_time', '--')} · Reboot {system.get('reboot_required', 'not required')}"
+            f"Boot {boot_summary} · Reboot {system.get('reboot_required', 'not required')}"
         )
         self.render_alerts(issues)
-        self.activity.set_text("\n".join(system.get("activity", ["No recent activity recorded."])))
+        self.render_activity(system.get("activity", ["No recent activity recorded."]))
+
+    def intelligence_summary(self, data, system, issues):
+        updates = system.get("updates") or 0
+        snapshot = system.get("snapshot", "Unavailable")
+        gpu_power = system.get("gpu_power", "--")
+        battery = system.get("battery", {})
+        battery_percent = data.get("battery_percent", "--")
+        if updates:
+            estimate = max(2, round(updates * 0.25))
+            reboot = "No reboot is currently expected" if system.get("reboot_required") != "required" else "A reboot is already pending"
+            recommendation = f"Install {updates} available updates"
+            estimate_text = f"Estimated time: {estimate} minutes · {reboot}"
+        elif issues:
+            recommendation = issues[0][1]
+            estimate_text = "Review the evidence before applying changes"
+        else:
+            recommendation = "No immediate action required"
+            estimate_text = "The system is within its operating thresholds"
+        backup_note = "Create a Btrfs snapshot before updating" if snapshot in ("Unavailable", "None found") else "Snapshot protection is available"
+        return (
+            "<div style='line-height:125%;'>"
+            "<span style='color:#A55DFF; font-weight:700;'>✦ RECOMMENDATION</span><br>"
+            f"<span style='color:#F2F6FA; font-size:15px; font-weight:700;'>{html.escape(recommendation)}</span><br>"
+            f"<span style='color:#B5BDC6;'>{html.escape(estimate_text)}</span>"
+            "<hr style='color:#16344D;'>"
+            "<span style='color:#35D66B; font-weight:700;'>⚡ POWER</span><br>"
+            f"Battery {battery_percent}% · GPU idle draw {html.escape(str(gpu_power))}"
+            "<hr style='color:#16344D;'>"
+            "<span style='color:#00AEEF; font-weight:700;'>◎ NEXT ACTION</span><br>"
+            f"<span style='color:#F2F6FA; font-weight:700;'>{html.escape(backup_note)}</span>"
+            "</div>"
+        )
+
+    def render_activity(self, entries):
+        while self.activity_rows.count():
+            item = self.activity_rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for entry in entries[:5]:
+            parts = str(entry).split(maxsplit=2)
+            stamp = parts[0] if parts and re.fullmatch(r"\d{1,2}:\d{2}", parts[0]) else "--:--"
+            category = parts[1] if len(parts) > 1 else "SYSTEM"
+            message = parts[2] if len(parts) > 2 else str(entry)
+            row = QFrame()
+            row.setObjectName("activityRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(9, 3, 9, 3)
+            time_label = QLabel(stamp)
+            time_label.setObjectName("activityTime")
+            category_label = QLabel(category)
+            category_label.setObjectName("activityCategory")
+            message_label = QLabel(message)
+            message_label.setObjectName("activityMessage")
+            detail = QVBoxLayout()
+            detail.setContentsMargins(0, 0, 0, 0)
+            detail.setSpacing(0)
+            detail.addWidget(category_label)
+            detail.addWidget(message_label)
+            row_layout.addWidget(time_label, 0, Qt.AlignTop)
+            row_layout.addLayout(detail, 1)
+            self.activity_rows.addWidget(row)
 
     def open_detail(self, key):
         data = getattr(self, "latest_data", {})
@@ -960,7 +1176,7 @@ class DashboardPage(QWidget):
         if system.get("snapshot") in ("Unavailable", "None found"): deduct("No verified snapshot", 5, system.get("snapshot", "Unknown"))
         score = max(0, score)
         lines = [
-            f"COMMAND OS READINESS                         {score}%",
+            f"{'MISSION READY' if score >= 80 else 'MISSION REVIEW'}                         {score}%",
             f"SYSTEM       {'READY' if data and failed == 0 else 'WARNING':<10} {failed} failed service(s)",
             f"THERMALS     {'READY' if max(cpu_temp, gpu_temp) < 70 else 'WARNING':<10} Peak {max(cpu_temp, gpu_temp):.0f}°C",
             f"SECURITY     {'READY' if system.get('firewall') == 'Enabled' and not updates else 'WARNING':<10} {updates} update(s)",
@@ -972,12 +1188,59 @@ class DashboardPage(QWidget):
         return score, deductions, lines
 
     def show_readiness_breakdown(self):
+        data = getattr(self, "latest_data", {})
+        system = getattr(self, "latest_system", {})
+        security = system.get("security", {})
+        updates = system.get("updates") or 0
+        storage = float(data.get("storage_percent") or 0)
+        battery = int(float(data.get("battery_percent") or 100))
+        categories = [
+            ("SECURITY", max(0, 100 - (25 if system.get("firewall") != "Enabled" else 0) - (10 if security.get("secure_boot") == "Disabled" else 0) - (15 if security.get("encryption") == "Disabled" else 0))),
+            ("STORAGE", max(0, min(100, int(110 - storage)))),
+            ("DRIVERS", 100 if system.get("gpu_driver") not in ("unknown", "not detected") else 55),
+            ("UPDATES", max(0, 100 - updates * 3)),
+            ("BATTERY", battery),
+            ("BACKUPS", 20 if system.get("snapshot") in ("Unavailable", "None found") else 100),
+            ("NETWORK", 100 if system.get("connection") not in ("Offline", "Unknown", None) else 20),
+            ("INTELLIGENCE", 100),
+        ]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Command Readiness Breakdown")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+        title = QLabel("COMMAND READINESS")
+        title.setObjectName("heroTitle")
+        score = self.readiness_gauge.score
+        summary = QLabel(f"{score}%   {'MISSION READY' if score >= 80 else 'MISSION REVIEW'}")
+        summary.setObjectName("healthHeader")
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        for label, value in categories:
+            row = QHBoxLayout()
+            name = QLabel(label)
+            name.setObjectName("panelTitle")
+            name.setMinimumWidth(170)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(value)
+            bar.setFormat(f"{value}%")
+            row.addWidget(name)
+            row.addWidget(bar, 1)
+            layout.addLayout(row)
+        evidence = QPlainTextEdit()
+        evidence.setReadOnly(True)
+        evidence.setObjectName("textPanel")
         deductions = getattr(self, "readiness_deductions", [])
-        if deductions:
-            detail = "\n".join(f"−{points:>2}  {label}\n     Evidence: {evidence}" for label, points, evidence in deductions)
-        else:
-            detail = "No readiness deductions are currently active."
-        QMessageBox.information(self, "Command OS Readiness Breakdown", detail)
+        evidence.setPlainText("WHY THE SCORE ISN'T 100%\n\n" + ("\n\n".join(
+            f"−{points}%  {label}\nEvidence: {detail}" for label, points, detail in deductions
+        ) or "No active deductions."))
+        layout.addWidget(evidence, 1)
+        close = QPushButton("CLOSE READINESS BREAKDOWN")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.setWindowState(Qt.WindowMaximized)
+        dialog.exec()
 
     def render_alerts(self, issues):
         while self.alerts_layout.count() > 1:
@@ -996,11 +1259,18 @@ class DashboardPage(QWidget):
         for severity, message, module_id, action in issues[:5]:
             row = QFrame()
             row.setObjectName("alertRow")
+            row.setProperty("severity", severity.lower())
             row_layout = QHBoxLayout(row)
-            label = QLabel(f"{severity:<9}  {message}")
+            row_layout.setContentsMargins(7, 1, 7, 1)
+            row_layout.setSpacing(6)
+            icon = "▲" if severity in ("WARNING", "CRITICAL") else "ⓘ"
+            label = QLabel(f"{icon}   {severity:<9}  {message}")
+            label.setObjectName("alertText")
             label.setWordWrap(True)
             row_layout.addWidget(label, 1)
             button = QPushButton(action)
+            button.setObjectName("alertAction")
+            button.setFixedHeight(22)
             button.clicked.connect(lambda checked=False, target=module_id: self.parent_window.open_module(target))
             row_layout.addWidget(button)
             self.alerts_layout.addWidget(row)
@@ -6780,11 +7050,6 @@ class CommandAppsPage(QWidget):
         self.widget_install = QPushButton("Install")
         self.widget_install.setObjectName("primaryButton")
         self.widget_install.clicked.connect(self.install_command_widget)
-        self.installer_status = QLabel("Checking installer components…")
-        self.installer_status.setObjectName("muted")
-        self.hello_button = QPushButton("OPEN COMMAND HELLO")
-        self.hello_button.setObjectName("primaryButton")
-        self.hello_button.clicked.connect(self.launch_command_hello)
         self.pdf_status = QLabel("Checking Command PDF…")
         self.pdf_status.setObjectName("muted")
         self.pdf_install = QPushButton("Install")
@@ -6794,6 +7059,11 @@ class CommandAppsPage(QWidget):
         self.pdf_open.clicked.connect(self.open_command_pdf)
         self.pdf_remove = QPushButton("Uninstall")
         self.pdf_remove.clicked.connect(self.uninstall_command_pdf)
+        self.curated_apps_status = QLabel("Checking curated app collection…")
+        self.curated_apps_status.setObjectName("muted")
+        self.curated_apps_install = QPushButton("INSTALL ALL CURATED APPS")
+        self.curated_apps_install.setObjectName("primaryButton")
+        self.curated_apps_install.clicked.connect(self.install_curated_apps)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setObjectName("textPanel")
@@ -6815,8 +7085,8 @@ class CommandAppsPage(QWidget):
 
         cards = QGridLayout()
         cards.addWidget(self.command_widget_card(), 0, 0)
-        cards.addWidget(self.installer_card(), 0, 1)
-        cards.addWidget(self.command_pdf_card(), 1, 0, 1, 2)
+        cards.addWidget(self.command_pdf_card(), 0, 1)
+        cards.addWidget(self.curated_apps_card(), 1, 0, 1, 2)
         cards.addWidget(self.command_centre_update_card(), 2, 0, 1, 2)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
@@ -6864,31 +7134,6 @@ class CommandAppsPage(QWidget):
         layout.addLayout(actions)
         return frame
 
-    def installer_card(self):
-        frame, layout = self.panel("CH   Command Hello & Installers")
-        description = QLabel(
-            "Start the CommandOS welcome experience, guided graphical installer, or advanced terminal installer. Destructive installation steps remain inside the installers and require explicit confirmation."
-        )
-        description.setWordWrap(True)
-        description.setObjectName("muted")
-        features = QLabel("AVAILABLE\n• Command Hello live welcome\n• Guided Calamares installation\n• Advanced terminal installation\n• CommandOS kernels, hooks, settings and keyring")
-        features.setObjectName("muted")
-        actions = QHBoxLayout()
-        graphical = QPushButton("Graphical Installer")
-        graphical.clicked.connect(self.launch_graphical_installer)
-        cli = QPushButton("CLI Installer")
-        cli.clicked.connect(self.launch_cli_installer)
-        actions.addWidget(self.hello_button)
-        actions.addWidget(graphical)
-        actions.addWidget(cli)
-        actions.addStretch()
-        layout.addWidget(description)
-        layout.addWidget(features)
-        layout.addStretch()
-        layout.addWidget(self.installer_status)
-        layout.addLayout(actions)
-        return frame
-
     def command_pdf_card(self):
         frame, layout = self.panel("CP   Command PDF")
         description = QLabel(
@@ -6911,35 +7156,108 @@ class CommandAppsPage(QWidget):
         layout.addLayout(actions)
         return frame
 
-    def launch_command_hello(self):
-        if not command_exists("command-hello"):
-            QMessageBox.warning(self, "Command Hello", "commandos-hello is not installed.")
-            return
-        subprocess.Popen(["command-hello"], start_new_session=True)
-        self.parent_window.add_history("Command Hello opened", category="APPLICATION")
+    def curated_apps_card(self):
+        frame, layout = self.panel("CA   Command Curated Apps")
+        description = QLabel(
+            "A portable collection of Command-selected applications for a fresh CachyOS installation. One click previews and installs everything in the collection that is not already present."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        features = QLabel("INCLUDES\n• Official repository applications\n• Selected AUR applications\n• Selected Flatpak applications\n• Missing-app detection before installation")
+        features.setObjectName("muted")
+        features.setWordWrap(True)
+        actions = QHBoxLayout()
+        actions.addWidget(self.curated_apps_install)
+        actions.addStretch()
+        layout.addWidget(description)
+        layout.addWidget(features)
+        layout.addWidget(self.curated_apps_status)
+        layout.addLayout(actions)
+        return frame
 
-    def launch_graphical_installer(self):
-        launcher = Path("/usr/local/bin/calamares-online.sh")
-        if launcher.is_file():
-            command = shlex.quote(str(launcher))
-        elif command_exists("calamares"):
-            command = "pkexec calamares -D6"
+    @staticmethod
+    def valid_package_names(output):
+        return sorted({name.strip() for name in output.splitlines() if re.fullmatch(r"[A-Za-z0-9@._+:-]+", name.strip())})
+
+    def curated_apps_inventory(self):
+        explicit_files = sorted(INVENTORY_DIR.glob("pacman-explicit-*.txt"), reverse=True)
+        foreign_files = sorted(INVENTORY_DIR.glob("pacman-foreign-aur-*.txt"), reverse=True)
+        flatpak_files = sorted(INVENTORY_DIR.glob("flatpak-apps-*.txt"), reverse=True)
+        if not explicit_files:
+            return {}
+        explicit = set(self.valid_package_names(safe_read_text(explicit_files[0])))
+        foreign = set(self.valid_package_names(safe_read_text(foreign_files[0]))) if foreign_files else set()
+        flatpaks = []
+        if flatpak_files:
+            flatpaks = self.valid_package_names("\n".join(
+                line.split("\t", 1)[0] for line in safe_read_text(flatpak_files[0]).splitlines()
+            ))
+        return {
+            "repository_packages": sorted(explicit - foreign),
+            "foreign_packages": sorted(explicit & foreign),
+            "flatpak_apps": flatpaks,
+        }
+
+    def refresh_curated_apps_status(self):
+        inventory = self.curated_apps_inventory()
+        total = sum(len(inventory.get(key, [])) for key in ("repository_packages", "foreign_packages", "flatpak_apps"))
+        if total:
+            self.curated_apps_status.setText(
+                f"● {total} CURATED APPS · {len(inventory.get('repository_packages', []))} repository · "
+                f"{len(inventory.get('foreign_packages', []))} AUR/local · {len(inventory.get('flatpak_apps', []))} Flatpak"
+            )
+            self.curated_apps_install.setEnabled(True)
         else:
-            QMessageBox.warning(self, "CommandOS Installer", "commandos-calamares is not installed.")
-            return
-        if not confirm(self, "Launch Graphical Installer", "Open the CommandOS graphical installer?\n\nDisk changes are made only after review and confirmation inside Calamares."):
-            return
-        ok, detail = launch_terminal("CommandOS Graphical Installer", command)
-        self.output.setPlainText("Graphical installer launched." if ok else detail)
+            self.curated_apps_status.setText("○ CURATED APP COLLECTION IS NOT INCLUDED")
+            self.curated_apps_install.setEnabled(False)
 
-    def launch_cli_installer(self):
-        if not command_exists("commandos-installer"):
-            QMessageBox.warning(self, "CommandOS CLI Installer", "commandos-cli-installer is not installed.")
+    def install_curated_apps(self):
+        inventory = self.curated_apps_inventory()
+        if not inventory:
+            QMessageBox.warning(self, "Command Curated Apps", "The curated app collection is not included in this installation.")
             return
-        if not confirm(self, "Launch CLI Installer", "Open the advanced CommandOS terminal installer?\n\nReview every storage action carefully before applying it."):
+
+        installed = set(self.valid_package_names(run_text(["pacman", "-Qq"], 20)[0])) if command_exists("pacman") else set()
+        installed_flatpaks = set(self.valid_package_names(run_text(["flatpak", "list", "--app", "--columns=application"], 20)[0])) if command_exists("flatpak") else set()
+        repository = [name for name in inventory.get("repository_packages", []) if name not in installed]
+        foreign = [name for name in inventory.get("foreign_packages", []) if name not in installed]
+        flatpaks = [name for name in inventory.get("flatpak_apps", []) if name not in installed_flatpaks]
+        missing_count = len(repository) + len(foreign) + len(flatpaks)
+        if not missing_count:
+            self.output.setPlainText("Every app in the Command Curated Apps collection is already installed.")
+            QMessageBox.information(self, "Command Curated Apps", "Every curated app is already installed.")
             return
-        ok, detail = launch_terminal("CommandOS CLI Installer", "sudo commandos-installer")
-        self.output.setPlainText("CLI installer launched." if ok else detail)
+
+        commands = []
+        unavailable = []
+        if repository:
+            commands.append("sudo pacman -S --needed " + " ".join(shlex.quote(name) for name in repository))
+        if foreign:
+            helper = "yay" if command_exists("yay") else "paru" if command_exists("paru") else ""
+            if helper:
+                commands.append(f"{helper} -S --needed " + " ".join(shlex.quote(name) for name in foreign))
+            else:
+                unavailable.extend(foreign)
+        if flatpaks:
+            if command_exists("flatpak"):
+                commands.append("flatpak install -y flathub " + " ".join(shlex.quote(name) for name in flatpaks))
+            else:
+                unavailable.extend(flatpaks)
+        preview_names = repository + foreign + flatpaks
+        preview = "\n".join(preview_names[:40])
+        if len(preview_names) > 40:
+            preview += f"\n… and {len(preview_names) - 40} more"
+        warning = f"\n\n{len(unavailable)} item(s) need yay/paru or Flatpak and cannot be installed in this run." if unavailable else ""
+        if not commands:
+            QMessageBox.warning(self, "Command Curated Apps", f"No supported installer is available for the {missing_count} missing app(s).")
+            return
+        if not confirm(self, "Install Command Curated Apps", f"Install {missing_count - len(unavailable)} missing app(s) from the Command Curated Apps collection?\n\n{preview}{warning}\n\nThe package managers will show their own review and authorization prompts."):
+            return
+        command = " && ".join(commands)
+        ok, terminal = launch_terminal("Install Command Curated Apps", command)
+        self.output.setPlainText(f"Command Curated Apps installation started in {terminal}." if ok else terminal)
+        if ok:
+            self.parent_window.add_history(f"Command Curated Apps installation started: {missing_count - len(unavailable)} app(s)", category="APPLICATION")
 
     def command_centre_update_card(self):
         frame, layout = self.panel("CC   Command Centre Update")
@@ -6992,8 +7310,11 @@ class CommandAppsPage(QWidget):
         http_daemon = Path.home() / ".local/bin/telemetry-http-daemon"
         return widget.exists() and daemon.exists() and http_daemon.exists()
 
-    def command_pdf_installed(self):
+    def command_pdf_user_installed(self):
         return (Path.home() / ".local/share/command-pdf/command_pdf.py").is_file() and (Path.home() / ".local/bin/command-pdf").exists()
+
+    def command_pdf_installed(self):
+        return self.command_pdf_user_installed() or command_exists("command-pdf")
 
     def refresh(self):
         installed = self.widget_installed()
@@ -7008,16 +7329,15 @@ class CommandAppsPage(QWidget):
             self.widget_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
             self.widget_install.setText("Install unavailable")
         self.widget_install.setEnabled(source_ready)
-        components = {
-            "Command Hello": command_exists("command-hello"),
-            "Calamares": command_exists("calamares"),
-            "CLI installer": command_exists("commandos-installer"),
-        }
-        self.installer_status.setText("  ·  ".join(f"{'●' if ready else '○'} {name} {'READY' if ready else 'MISSING'}" for name, ready in components.items()))
-        self.hello_button.setEnabled(components["Command Hello"])
+        self.refresh_curated_apps_status()
         pdf_ready = (COMMAND_PDF_DIR / "install.sh").is_file()
         pdf_installed = self.command_pdf_installed()
-        if pdf_installed:
+        pdf_user_installed = self.command_pdf_user_installed()
+        pdf_system_installed = command_exists("command-pdf") and not pdf_user_installed
+        if pdf_system_installed:
+            self.pdf_status.setText("● INSTALLED · Command PDF is managed by the system package manager")
+            self.pdf_install.setText("Managed by pacman")
+        elif pdf_user_installed:
             self.pdf_status.setText("● INSTALLED · User-local Command PDF application is ready")
             self.pdf_install.setText("Reinstall / Update")
         elif pdf_ready:
@@ -7026,16 +7346,16 @@ class CommandAppsPage(QWidget):
         else:
             self.pdf_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
             self.pdf_install.setText("Install unavailable")
-        self.pdf_install.setEnabled(pdf_ready)
-        self.pdf_open.setEnabled(pdf_installed or command_exists("command-pdf"))
-        self.pdf_remove.setEnabled(pdf_installed)
+        self.pdf_install.setEnabled(pdf_ready and not pdf_system_installed)
+        self.pdf_open.setEnabled(pdf_installed)
+        self.pdf_remove.setEnabled(pdf_user_installed)
 
     def install_command_pdf(self):
         installer = COMMAND_PDF_DIR / "install.sh"
         if not installer.is_file():
             QMessageBox.warning(self, "Command PDF", f"Installer not found:\n{installer}")
             return
-        action = "update" if self.command_pdf_installed() else "install"
+        action = "update" if self.command_pdf_user_installed() else "install"
         if not confirm(self, f"{action.title()} Command PDF", "Install Command PDF for your user account?\n\nThe app is stored under ~/.local and its Python dependencies are isolated in a private environment."):
             return
         self.pdf_install.setEnabled(False)
@@ -7437,6 +7757,8 @@ class MainWindow(QMainWindow):
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
         self.sidebar = QVBoxLayout()
+        self.sidebar.setContentsMargins(6, 7, 6, 7)
+        self.sidebar.setSpacing(5)
         self.stack = QStackedWidget()
 
         self.sidebar.addWidget(self.brand_widget())
@@ -8009,24 +8331,28 @@ def main():
     app.setStyleSheet(
         """
         QWidget {
-            background: #05080c;
-            color: #edf5fb;
+            background: #030910;
+            color: #e9f3fb;
             font-family: Segoe UI, Inter, sans-serif;
             font-size: 13px;
             selection-background-color: #1677b9;
             selection-color: #ffffff;
         }
+        QLabel {
+            background: transparent;
+            border: 0;
+        }
         #appRoot {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #020407, stop:0.58 #081018, stop:1 #020304);
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #02070c, stop:0.58 #06111a, stop:1 #010509);
         }
         #sidebar {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #090d12, stop:0.45 #101822, stop:1 #05070a);
-            border-right: 1px solid #203245;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #07131d, stop:0.52 #05101a, stop:1 #020a11);
+            border-right: 1px solid #16415d;
         }
         #brand {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #101820, stop:0.55 #0b1118, stop:1 #07111a);
-            border: 1px solid #284057;
-            border-radius: 8px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #091925, stop:0.55 #06111a, stop:1 #03101a);
+            border: 1px solid #135077;
+            border-radius: 9px;
         }
         #brandLogo {
             background: #070b10;
@@ -8040,9 +8366,9 @@ def main():
             letter-spacing: 1px;
         }
         #hero {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #101823, stop:0.55 #080d13, stop:1 #020406);
-            border: 1px solid #284963;
-            border-radius: 8px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #071722, stop:0.55 #03101a, stop:1 #02090f);
+            border: 1px solid #15577f;
+            border-radius: 10px;
         }
         #heroLogo {
             background: #020406;
@@ -8051,21 +8377,21 @@ def main():
         }
         #heroEyebrow {
             color: #4abfff;
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 900;
             letter-spacing: 3px;
         }
         #heroTitle {
             color: #f6f9fb;
-            font-size: 34px;
+            font-size: 42px;
             font-weight: 900;
-            letter-spacing: 5px;
+            letter-spacing: 3px;
         }
         #heroSubtitle {
-            color: #55bdff;
-            font-size: 13px;
+            color: #00AEEF;
+            font-size: 12px;
             font-weight: 800;
-            letter-spacing: 6px;
+            letter-spacing: 8px;
         }
         #healthHeader {
             background: rgba(3, 8, 14, 178);
@@ -8077,35 +8403,81 @@ def main():
             color: #dff5ff;
             letter-spacing: 1px;
         }
+        #heroStatus {
+            background: transparent;
+            border: 0;
+            border-top: 1px solid #123b56;
+            padding: 8px 0 1px 0;
+            color: #d4e5f2;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+        #missionChip {
+            background: rgba(7, 10, 14, 150);
+            border: 1px solid #16344D;
+            border-radius: 8px;
+            min-width: 112px;
+            padding: 5px 8px;
+            color: #B5BDC6;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+        #missionChip[state="success"] { color: #35D66B; border-color: #205C3A; }
+        #missionChip[state="warning"] { color: #F4B942; border-color: #614B20; }
+        #missionChip[state="critical"] { color: #FF4B4B; border-color: #6B2929; }
+        #missionChip[state="info"] { color: #2BC4FF; border-color: #164B67; }
         #navButton {
             text-align: left;
-            min-height: 40px;
-            padding: 9px 11px;
+            min-height: 38px;
+            padding: 8px 11px;
             border: 1px solid transparent;
-            border-radius: 7px;
+            border-radius: 8px;
             background: transparent;
             color: #b9c8d5;
             font-weight: 700;
         }
         #navButton:hover {
-            background: #121c27;
-            border-color: #2b4d68;
+            background: #0a2030;
+            border-color: #1b5579;
             color: #edf8ff;
         }
         #navButton:checked {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #16334a, stop:1 #0d1823);
-            border-color: #1e9be8;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0d3f63, stop:0.72 #08283d, stop:1 #061724);
+            border-color: #13aef8;
             color: #ffffff;
         }
         #card, QFrame#card {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #101821, stop:1 #090e14);
-            border: 1px solid #25394a;
-            border-radius: 8px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #101822, stop:0.58 #0B141D, stop:1 #091018);
+            border: 1px solid #183d56;
+            border-radius: 14px;
         }
+        #card:hover, QFrame#card:hover {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #152131, stop:1 #0D1823);
+            border-color: #2976A3;
+        }
+        QFrame#card[accent="#00AEEF"] { border-left: 2px solid #00AEEF; }
+        QFrame#card[accent="#35D66B"] { border-left: 2px solid #35D66B; }
+        QFrame#card[accent="#A55DFF"] { border-left: 2px solid #A55DFF; }
+        QFrame#card[accent="#F0B230"] { border-left: 2px solid #F0B230; }
         #alertRow, QFrame#alertRow {
-            background: #0b131b;
+            background: #0B1017;
             border: 1px solid #30465a;
-            border-radius: 6px;
+            border-radius: 8px;
+            padding: 2px;
+        }
+        QFrame#alertRow[severity="warning"] { border-left: 6px solid #F4B942; }
+        QFrame#alertRow[severity="critical"] { border-left: 6px solid #FF4B4B; }
+        QFrame#alertRow[severity="advisory"] { border-left: 6px solid #00AEEF; }
+        #alertText { color: #DCE6EE; font-size: 12px; font-weight: 650; }
+        #alertAction {
+            min-height: 20px;
+            max-height: 22px;
+            padding: 1px 8px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: 800;
         }
         #queueBar, QFrame#queueBar {
             background: #102131;
@@ -8168,17 +8540,17 @@ def main():
         }
         #metricValue {
             color: #ffffff;
-            font-size: 29px;
+            font-size: 34px;
             font-weight: 900;
             letter-spacing: 1px;
         }
         #muted {
-            color: #97a9b8;
+            color: #a8bac8;
         }
         #panelTitle {
             color: #f2f6fa;
-            font-size: 15px;
-            font-weight: 900;
+            font-size: 18px;
+            font-weight: 700;
             letter-spacing: 1px;
         }
         #bar {
@@ -8187,6 +8559,31 @@ def main():
             border-radius: 4px;
             min-height: 8px;
             max-height: 8px;
+        }
+        QProgressBar#metricBar {
+            background: #101A24;
+            border: 0;
+            border-radius: 3px;
+            min-height: 7px;
+            max-height: 7px;
+        }
+        QProgressBar#metricBar::chunk { background: #00AEEF; border-radius: 3px; }
+        QProgressBar#metricBar[accent="#35D66B"]::chunk { background: #35D66B; }
+        QProgressBar#metricBar[accent="#A55DFF"]::chunk { background: #A55DFF; }
+        QProgressBar#metricBar[accent="#F0B230"]::chunk { background: #F0B230; }
+        #activityRow {
+            background: #0B1017;
+            border: 1px solid #16344D;
+            border-left: 2px solid #00AEEF;
+            border-radius: 7px;
+        }
+        #activityTime { color: #9AAAB7; font-family: JetBrains Mono, monospace; font-size: 12px; min-width: 48px; }
+        #activityCategory { color: #2BC4FF; font-size: 11px; font-weight: 800; min-width: 64px; }
+        #activityMessage { color: #DCE6EE; font-weight: 650; }
+        #readinessDetail {
+            color: #B9C5CE;
+            font-family: JetBrains Mono, Cascadia Code, monospace;
+            font-size: 12px;
         }
         #textPanel {
             background: #05080c;
@@ -8232,6 +8629,20 @@ def main():
         #primaryButton:hover {
             background: #1688cb;
         }
+        #quickActionButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #101E2B, stop:1 #09131D);
+            border: 1px solid #204661;
+            border-radius: 10px;
+            color: #DCEAF4;
+            font-size: 13px;
+            font-weight: 800;
+            padding: 10px;
+        }
+        #quickActionButton:hover {
+            background: #102C40;
+            border-color: #2BC4FF;
+            color: #FFFFFF;
+        }
         #attachButton {
             min-width: 38px;
             max-width: 38px;
@@ -8247,10 +8658,10 @@ def main():
             border-color: #55bdff;
         }
         QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1b2734, stop:1 #0e151d);
-            border: 1px solid #3a5368;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #102536, stop:1 #081520);
+            border: 1px solid #28516c;
             border-radius: 7px;
-            padding: 8px 11px;
+            padding: 7px 10px;
             color: #e7f3fb;
             font-weight: 750;
         }

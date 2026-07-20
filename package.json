@@ -1,6 +1,6 @@
 {
   "name": "command-centre",
-  "version": "1.2.0",
+  "version": "1.0.5",
   "description": "CommandOS operations dashboard and investigation workspace.",
   "private": true,
   "scripts": {

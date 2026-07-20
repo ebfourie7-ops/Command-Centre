@@ -1,0 +1,12 @@
+balena-etcher
+burpsuite
+chirp-next
+cubicsdr
+fldigi
+js8call
+platformio-git
+qsstv
+rustdesk-bin
+sdrpp-git
+sunshine-bin
+visual-studio-code-bin

@@ -1,0 +1,1 @@
+com.ultimaker.cura	UltiMaker Cura	5.13.0	stable	flathub
