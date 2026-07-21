@@ -1,6 +1,6 @@
-# Command Widget
+# Command Widget 1.1.0
 
-**Version 1.0.0**
+**Version 1.1.0**
 
 Command Widget is a configurable KDE Plasma 6 system-monitoring widget. It can be installed as a standalone project or from the offline copy bundled with Command Centre.
 
@@ -32,7 +32,15 @@ Unavailable optional tools or sensors are handled gracefully.
 
 ## Install or update
 
-Clone the standalone repository and run its installer:
+Install the published SourceForge package from Command Centre under **Command
+Apps**, or configure the CommandOS repository and run:
+
+```bash
+sudo pacman -S command-widget
+command-widget-install
+```
+
+Developers can clone the standalone repository and run its installer:
 
 ```bash
 git clone https://github.com/ebfourie7-ops/Command-Widget.git
@@ -104,4 +112,4 @@ command-widget/
 
 ## License
 
-Command Widget is released under the MIT License. See `LICENSE` in the standalone repository.
+See `LICENSE` for the Command Widget distribution terms.

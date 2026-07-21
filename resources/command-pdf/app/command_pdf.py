@@ -5,7 +5,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPen
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
 
 APP_DIR = Path(__file__).resolve().parent
 ICON = APP_DIR / "assets" / "command-pdf.png"
+APP_VERSION = "1.1.0"
 
 
 def require_fitz(parent):
@@ -33,6 +36,49 @@ def require_fitz(parent):
 def output_path(parent, title, suggested):
     path, _ = QFileDialog.getSaveFileName(parent, title, str(suggested), "PDF documents (*.pdf)")
     return Path(path) if path else None
+
+
+def write_docx(path, pages, page_width, page_height):
+    """Write a small standards-compliant DOCX without external Python modules."""
+    paragraphs = []
+    for page_number, blocks in enumerate(pages):
+        for text in blocks:
+            runs = []
+            for line_number, line in enumerate(text.splitlines() or [""]):
+                if line_number:
+                    runs.append("<w:r><w:br/></w:r>")
+                runs.append(f'<w:r><w:t xml:space="preserve">{escape(line)}</w:t></w:r>')
+            paragraphs.append("<w:p>" + "".join(runs) + "</w:p>")
+        if page_number < len(pages) - 1:
+            paragraphs.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
+    width_twips = max(1, round(page_width * 20))
+    height_twips = max(1, round(page_height * 20))
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:body>' + "".join(paragraphs) +
+        f'<w:sectPr><w:pgSz w:w="{width_twips}" w:h="{height_twips}"/>'
+        '<w:pgMar w:top="792" w:right="936" w:bottom="792" w:left="936"/></w:sectPr>'
+        '</w:body></w:document>'
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '</Types>'
+    )
+    relationships = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        '</Relationships>'
+    )
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", relationships)
+        archive.writestr("word/document.xml", document_xml)
 
 
 class SignaturePad(QWidget):
@@ -124,7 +170,7 @@ class TextDialog(QDialog):
 class CommandPDF(QMainWindow):
     def __init__(self, initial=None):
         super().__init__()
-        self.setWindowTitle("Command PDF")
+        self.setWindowTitle(f"Command PDF v{APP_VERSION}")
         self.setWindowIcon(QIcon(str(ICON)))
         self.resize(1280, 820)
         self.setAcceptDrops(True)
@@ -402,41 +448,18 @@ class CommandPDF(QMainWindow):
 
     def pdf_to_docx(self):
         if not self.ensure_document(): return
-        try:
-            from docx import Document
-            from docx.enum.text import WD_BREAK
-            from docx.shared import Inches, Pt
-        except ImportError:
-            QMessageBox.critical(self, "Conversion unavailable", "python-docx is missing. Run setup.sh in the Command PDF folder.")
-            return
         fitz = require_fitz(self)
         if not fitz: return
         target, _ = QFileDialog.getSaveFileName(self, "Save Word document", str(self.current.with_suffix('.docx')), "Word documents (*.docx)")
         if not target: return
         source = fitz.open(self.current)
-        document = Document()
-        section = document.sections[0]
-        if len(source):
-            page_rect = source[0].rect
-            section.page_width = Inches(page_rect.width / 72)
-            section.page_height = Inches(page_rect.height / 72)
-            section.top_margin = section.bottom_margin = Inches(.55)
-            section.left_margin = section.right_margin = Inches(.65)
-        for page_number, page in enumerate(source):
+        page_rect = source[0].rect if len(source) else fitz.Rect(0, 0, 612, 792)
+        pages = []
+        for page in source:
             blocks = sorted(page.get_text("blocks"), key=lambda block: (round(block[1] / 6), block[0]))
-            for block in blocks:
-                text = block[4].strip()
-                if not text: continue
-                paragraph = document.add_paragraph()
-                paragraph.paragraph_format.space_after = Pt(4)
-                lines = text.splitlines()
-                for index, line in enumerate(lines):
-                    paragraph.add_run(line)
-                    if index < len(lines) - 1: paragraph.add_run().add_break()
-            if page_number < len(source) - 1:
-                document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+            pages.append([block[4].strip() for block in blocks if block[4].strip()])
         source.close()
-        document.save(target)
+        write_docx(target, pages, page_rect.width, page_rect.height)
         self.status.setText(f"Word document saved to {target}")
 
     def extract_text(self):

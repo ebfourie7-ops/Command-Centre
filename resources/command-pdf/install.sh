@@ -14,7 +14,7 @@ install -m 644 "$ROOT_DIR/app/assets/command-pdf.png" "$INSTALL_DIR/assets/comma
 install -m 644 "$ROOT_DIR/app/README.md" "$INSTALL_DIR/README.md"
 
 python -m venv --system-site-packages "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pymupdf python-docx
+"$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pymupdf
 
 ln -sfn "$INSTALL_DIR/start.sh" "$BIN_DIR/command-pdf"
 install -m 644 "$ROOT_DIR/org.commandos.PDF.desktop" "$APP_DIR/org.commandos.PDF.desktop"
