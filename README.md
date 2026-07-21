@@ -11,9 +11,11 @@ Command Centre is a native Python/PySide6 desktop application for the CommandOS 
 - Confirm-first controls for changing actions
 - Command palette with `Ctrl+K`
 - Main tabs for System Dashboard, Tool Library, Command Apps, Command Terminal, Command Intel, Offline Knowledge, and Software Centre
-- Command Apps catalogue with descriptions, installation-state detection, confirm-first installers, a bundled offline Command Widget installer/update action, and a CommandOS Installer placeholder
+- Command Apps catalogue with descriptions, installation-state detection, confirm-first installers, a bundled offline Command Widget installer/update action, and live controls for Command Hello, Calamares, and the CommandOS CLI installer
+- Command Apps includes user-local install, update, open, and uninstall controls for the bundled Command PDF reader, converter, editor, and visible-signature app
 - Command Apps directs installed systems to reviewed package updates; direct branch downloads and privileged source-tree execution are disabled
 - Software Centre includes update checks, package search, confirm-first install/remove actions, Flatpak updates, package list export, and maintenance command previews
+- Software Centre provides selectable orphan and foreign-package management with inspect, keep, update/rebuild, and confirmed removal actions
 - Software Centre includes a Kernel Manager for listing, installing, and removing kernels through `chwd-kernel`, plus initramfs and GRUB rebuild actions
 - Tool Library auto-refreshes from live pacman, Flatpak, desktop launcher, and executable scans, with launch, terminal, install, and guide actions
 - Command Terminal provides a VS Code-style workspace with explorer, editor tabs, save/save-all, terminal/output, and an in-app local HTML preview
@@ -48,11 +50,12 @@ The desktop launcher is:
 Command Centre.desktop
 ```
 
-## Versions
+## Version 1.1.0
 
-- `v0.9` adds secure package-update guidance, bundled Command Widget installation, local HTML previews, persistent agent chat history, and provider authentication controls.
-- `v0.1` is the preserved baseline before the integrated Command Intel case platform.
-- The active development branch is the branch checked out in this workspace.
+Command Centre, Command Widget, and Command PDF are released together as version
+`1.1.0`. This release adds the redesigned application navigation, Software Centre,
+Tool Library, Offline Intelligence workspace, SourceForge package installation,
+and system-managed Command Apps updates.
 
 Command Intel stores its case database and copied evidence under:
 
@@ -62,34 +65,26 @@ Command Intel stores its case database and copied evidence under:
 
 Crash reports are written to `~/.local/state/command-centre/crash.log`. Arch packaging files are under `packaging/arch/`.
 
-The project includes a pacman-compatible repository under `arch-repo/x86_64`.
-Build or refresh it with `./scripts/update-arch-repo.sh`; local installation and
-repository-signing instructions are in `arch-repo/README.md`.
+The project publishes the `[commandos]` pacman repository at
+`https://linux-commandos.sourceforge.io/repo/x86_64`.
+Build the complete SourceForge release with `./scripts/build-sourceforge-release.sh`.
 
 ## Install on Arch Linux
 
-Import and locally trust the dedicated Command Centre repository key:
+Download and run the installer:
 
 ```bash
-curl -fsSL \
-  https://ebfourie7-ops.github.io/Command-Centre/arch-repo/command-centre-repo-key.asc \
-  -o /tmp/command-centre-repo-key.asc
-sudo pacman-key --add /tmp/command-centre-repo-key.asc
-sudo pacman-key --lsign-key D6D28256B728685F4D4426A2A8214620EA123648
-```
-
-Verify the fingerprint before trusting it:
-
-```text
-D6D2 8256 B728 685F 4D44 26A2 A821 4620 EA12 3648
+curl -fLO https://linux-commandos.sourceforge.io/releases/1.1.0/install-command-centre-1.1.0.sh
+chmod +x install-command-centre-1.1.0.sh
+./install-command-centre-1.1.0.sh
 ```
 
 Add the repository above the standard repositories in `/etc/pacman.conf`:
 
 ```ini
-[command-centre]
-SigLevel = Required DatabaseOptional
-Server = https://ebfourie7-ops.github.io/Command-Centre/arch-repo/x86_64
+[commandos]
+SigLevel = Never
+Server = https://linux-commandos.sourceforge.io/repo/x86_64
 ```
 
 Install Command Centre normally through pacman:
@@ -99,15 +94,17 @@ sudo pacman -Syy
 sudo pacman -S command-centre
 ```
 
-After installation, the **UPDATE COMMAND CENTRE** button verifies and configures
-this signed repository automatically and opens the normal pacman update flow.
+Command Apps installs and updates `command-widget` and `command-pdf` from the same
+SourceForge repository. **UPDATE COMMAND CENTRE** configures the repository and
+opens the normal pacman update flow.
 
 Privileged and system command activity is recorded in a private rotating JSONL
 audit log at `~/.local/state/command-centre/actions.jsonl`. Developer-facing
 module boundaries and security rules are documented in `ARCHITECTURE.md` and
 `CONTRIBUTING.md`.
 
-The Command Widget installer payload is bundled under `resources/command-widget/`, so installing or updating the widget does not require a separate Command-widget checkout or an internet connection.
+Bundled Command Widget and Command PDF payloads remain available for development;
+published installations and updates use the SourceForge packages.
 
 Run the automated checks with:
 

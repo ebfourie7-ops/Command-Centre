@@ -1,41 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-fingerprint=D6D28256B728685F4D4426A2A8214620EA123648
-key_url=https://ebfourie7-ops.github.io/Command-Centre/arch-repo/command-centre-repo-key.asc
-repository_url=https://ebfourie7-ops.github.io/Command-Centre/arch-repo/x86_64
-temporary_key=$(mktemp)
-trap 'rm -f -- "$temporary_key"' EXIT
+repository_url=https://linux-commandos.sourceforge.io/repo/x86_64
+packages=("${@:-command-centre}")
 
-command -v curl >/dev/null || { echo "curl is required to configure the Command Centre repository." >&2; exit 1; }
-command -v gpg >/dev/null || { echo "gpg is required to verify the Command Centre repository key." >&2; exit 1; }
+for package in "${packages[@]}"; do
+  case "$package" in
+    command-centre|command-widget|command-pdf) ;;
+    *) echo "Unsupported CommandOS package: $package" >&2; exit 2 ;;
+  esac
+done
 
-echo "Downloading the Command Centre public repository key..."
-curl --fail --silent --show-error --location "$key_url" --output "$temporary_key"
-downloaded_fingerprint=$(gpg --batch --show-keys --with-colons "$temporary_key" | awk -F: '$1 == "fpr" {print $10; exit}')
-if [[ "$downloaded_fingerprint" != "$fingerprint" ]]; then
-  echo "Repository key verification failed." >&2
-  echo "Expected: $fingerprint" >&2
-  echo "Received: ${downloaded_fingerprint:-none}" >&2
-  exit 1
-fi
+command -v curl >/dev/null || { echo "curl is required to configure the SourceForge repository." >&2; exit 1; }
+curl --fail --silent --show-error --location "$repository_url/commandos.db" --output /dev/null
 
-echo "Verified repository key: $fingerprint"
-sudo pacman-key --add "$temporary_key"
-sudo pacman-key --lsign-key "$fingerprint"
+temporary_conf=$(mktemp)
+trap 'rm -f -- "$temporary_conf"' EXIT
 
-if ! grep -Eq '^\[command-centre\][[:space:]]*$' /etc/pacman.conf; then
-  echo "Adding the signed Command Centre repository to /etc/pacman.conf..."
-  sudo cp --preserve=mode,ownership,timestamps /etc/pacman.conf "/etc/pacman.conf.command-centre-backup"
-  printf '\n[command-centre]\nSigLevel = Required DatabaseOptional\nServer = %s\n' "$repository_url" \
-    | sudo tee -a /etc/pacman.conf >/dev/null
-else
-  echo "Command Centre repository is already configured."
-fi
+awk -v server="$repository_url" '
+  BEGIN { in_commandos=0; found=0 }
+  /^\[commandos\][[:space:]]*$/ {
+    found=1; in_commandos=1
+    print "[commandos]"
+    print "SigLevel = Never"
+    print "Server = " server
+    next
+  }
+  in_commandos && /^\[/ { in_commandos=0 }
+  in_commandos && /^(SigLevel|Server)[[:space:]]*=/ { next }
+  { print }
+  END {
+    if (!found) {
+      print ""
+      print "[commandos]"
+      print "SigLevel = Never"
+      print "Server = " server
+    }
+  }
+' /etc/pacman.conf > "$temporary_conf"
 
-echo "Synchronizing repositories and updating Command Centre..."
-sudo pacman -Syu --needed command-centre
+sudo cp --preserve=mode,ownership,timestamps /etc/pacman.conf "/etc/pacman.conf.commandos-backup"
+sudo install -m 0644 "$temporary_conf" /etc/pacman.conf
 
-echo
-echo "Command Centre update complete. Restart the application to load the new version."
-read -n 1 -s -r -p "Press any key to close this terminal..."
+echo "Refreshing the CommandOS repository from SourceForge..."
+sudo pacman -Syyu --needed "${packages[@]}"
+echo "Installed or updated: ${packages[*]}"

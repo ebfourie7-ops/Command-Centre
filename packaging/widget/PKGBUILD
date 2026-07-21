@@ -1,0 +1,22 @@
+pkgname=command-widget
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='CommandOS Plasma telemetry widget and local monitoring services'
+arch=('any')
+url='https://github.com/ebfourie7-ops/Command-Widget'
+license=('custom:Command-Widget')
+depends=('bash' 'python' 'systemd')
+optdepends=('plasma-workspace: KDE Plasma widget host' 'smartmontools: storage health telemetry')
+source=()
+sha256sums=()
+
+package() {
+    local widget_source="$startdir/../../resources/command-widget"
+    install -d "$pkgdir/opt/command-widget"
+    cp -a "$widget_source/." "$pkgdir/opt/command-widget/"
+    install -d "$pkgdir/usr/bin"
+    printf '#!/bin/sh\nexec /bin/bash /opt/command-widget/install.sh "$@"\n' > "$pkgdir/usr/bin/command-widget-install"
+    printf '#!/bin/sh\nexec /bin/bash /opt/command-widget/uninstall.sh "$@"\n' > "$pkgdir/usr/bin/command-widget-uninstall"
+    chmod 755 "$pkgdir/usr/bin/command-widget-install" "$pkgdir/usr/bin/command-widget-uninstall"
+    install -Dm644 "$widget_source/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -6,6 +6,7 @@ STATE_FILE="$STATE_DIR/telemetry.json"
 PID_FILE="$STATE_DIR/telemetry-daemon.pid"
 NET_SAMPLE_FILE="$STATE_DIR/network.sample"
 STORAGE_SAMPLE_FILE="$STATE_DIR/storage.sample"
+STORAGE_DEVICES_SAMPLE_FILE="$STATE_DIR/storage-devices.sample"
 FAN_MAX_RPM="${FAN_MAX_RPM:-6000}"
 NET_SCALE_BPS="${NET_SCALE_BPS:-125000000}"
 
@@ -50,14 +51,30 @@ ram_display() {
 }
 
 cpu_temp() {
-  local temp
+  local hwmon name input temp=""
 
-  temp=$(find /sys/class/hwmon -name 'temp*_input' -exec cat {} + 2>/dev/null \
-    | awk '$1 > 0 && $1 < 120000 { if ($1 > max) max=$1 } END { if (max) print max }')
+  temp=$(for hwmon in /sys/class/hwmon/hwmon*; do
+    [ -r "$hwmon/name" ] || continue
+    name=$(cat "$hwmon/name" 2>/dev/null || true)
+    case "$name" in
+      k10temp|coretemp|zenpower)
+        for input in "$hwmon"/temp*_input; do
+          [ -r "$input" ] && cat "$input"
+        done
+        ;;
+    esac
+  done | awk '$1 > 0 && $1 < 120000 { if ($1 > max) max=$1 } END { if (max) print max }')
 
   if [ -z "$temp" ]; then
-    temp=$(find /sys/class/thermal -name temp -exec cat {} + 2>/dev/null \
-      | awk '$1 > 0 && $1 < 120000 { if ($1 > max) max=$1 } END { if (max) print max }')
+    temp=$(for hwmon in /sys/class/hwmon/hwmon*; do
+      [ -r "$hwmon/name" ] || continue
+      name=$(cat "$hwmon/name" 2>/dev/null || true)
+      if [ "$name" = "acpitz" ]; then
+        for input in "$hwmon"/temp*_input; do
+          [ -r "$input" ] && cat "$input"
+        done
+      fi
+    done | awk '$1 > 0 && $1 < 120000 { if ($1 > max) max=$1 } END { if (max) print max }')
   fi
 
   if [ -n "$temp" ]; then
@@ -451,9 +468,14 @@ while true; do
   battery_usage=$(battery_percent)
   battery_state=$(battery_status | json_escape)
   battery_power=$(battery_watts)
+  device_data=$(telemetry-devices "$STORAGE_DEVICES_SAMPLE_FILE" 2>/dev/null || printf '{"gpu_devices":[],"storage_devices":[],"cpu_cores":[],"network_interfaces":[]}')
 
-  printf '{"timestamp":"%s","power_profile":"%s","power_profile_label":"%s","cpu_usage":"%s","cpu_temp":"%s","cpu_frequency":"%s","ram_usage":"%s","ram_info":"%s","gpu_name":"%s","gpu_vram":"%s","gpu_usage":"%s","gpu_temp":"%s","storage_name":"%s","storage_percent":"%s","storage_usage":"%s","storage_read":"%s","storage_write":"%s","fan_percent":"%s","fan_rpm":"%s","network_iface":"%s","network_down":"%s","network_up":"%s","network_percent":"%s","vpn_status":"%s","battery_percent":"%s","battery_status":"%s","battery_watts":"%s"}\n' \
-    "$timestamp" "$profile" "$profile_label" "$cpu_usage" "$cpu_temperature" "$cpu_speed" "$ram_usage" "$ram_info" "$active_gpu" "$gpu_memory" "$gpu_usage" "$gpu_temperature" "$disk_name" "$disk_usage" "$disk_info" "$disk_read" "$disk_write" "$fan_usage" "$fan_speed" "$network_iface" "$network_down" "$network_up" "$network_usage" "$vpn_state" "$battery_usage" "$battery_state" "$battery_power" > "$STATE_FILE"
+  printf '{"timestamp":"%s","power_profile":"%s","power_profile_label":"%s","cpu_usage":"%s","cpu_temp":"%s","cpu_frequency":"%s","ram_usage":"%s","ram_info":"%s","gpu_name":"%s","gpu_vram":"%s","gpu_usage":"%s","gpu_temp":"%s","storage_name":"%s","storage_percent":"%s","storage_usage":"%s","storage_read":"%s","storage_write":"%s","fan_percent":"%s","fan_rpm":"%s","network_iface":"%s","network_down":"%s","network_up":"%s","network_percent":"%s","vpn_status":"%s","battery_percent":"%s","battery_status":"%s","battery_watts":"%s","gpu_devices":%s,"storage_devices":%s,"cpu_cores":%s,"network_interfaces":%s}\n' \
+    "$timestamp" "$profile" "$profile_label" "$cpu_usage" "$cpu_temperature" "$cpu_speed" "$ram_usage" "$ram_info" "$active_gpu" "$gpu_memory" "$gpu_usage" "$gpu_temperature" "$disk_name" "$disk_usage" "$disk_info" "$disk_read" "$disk_write" "$fan_usage" "$fan_speed" "$network_iface" "$network_down" "$network_up" "$network_usage" "$vpn_state" "$battery_usage" "$battery_state" "$battery_power" \
+    "$(printf '%s' "$device_data" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("gpu_devices", []), separators=(",", ":")))' 2>/dev/null || printf '[]')" \
+    "$(printf '%s' "$device_data" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("storage_devices", []), separators=(",", ":")))' 2>/dev/null || printf '[]')" \
+    "$(printf '%s' "$device_data" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("cpu_cores", []), separators=(",", ":")))' 2>/dev/null || printf '[]')" \
+    "$(printf '%s' "$device_data" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("network_interfaces", []), separators=(",", ":")))' 2>/dev/null || printf '[]')" > "$STATE_FILE"
 
   sleep 5
 done

@@ -1,0 +1,27 @@
+pkgname=command-pdf
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='CommandOS PDF reader, converter, editor, and visible-signature app'
+arch=('any')
+url='https://github.com/ebfourie7-ops/Command-PDF'
+license=('GPL-3.0-or-later')
+depends=('python' 'pyside6' 'python-pymupdf' 'poppler')
+optdepends=('libreoffice-fresh: convert office documents to PDF')
+source=()
+sha256sums=()
+
+package() {
+    local app_source="$startdir/../../resources/command-pdf/app"
+    install -d "$pkgdir/opt/command-pdf/assets" "$pkgdir/usr/bin"
+    install -m755 "$app_source/command_pdf.py" "$pkgdir/opt/command-pdf/command_pdf.py"
+    install -m644 "$app_source/assets/command-pdf.png" "$pkgdir/opt/command-pdf/assets/command-pdf.png"
+    install -m644 "$app_source/README.md" "$pkgdir/opt/command-pdf/README.md"
+    printf '#!/bin/sh\nexec python /opt/command-pdf/command_pdf.py "$@"\n' > "$pkgdir/usr/bin/command-pdf"
+    chmod 755 "$pkgdir/usr/bin/command-pdf"
+    install -Dm644 "$startdir/../../resources/command-pdf/org.commandos.PDF.desktop" \
+        "$pkgdir/usr/share/applications/org.commandos.PDF.desktop"
+    install -Dm644 "$app_source/assets/command-pdf.png" \
+        "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/org.commandos.PDF.png"
+    install -Dm644 "$startdir/../../LICENSE" \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -2,6 +2,7 @@
 import json
 import html
 import hashlib
+import math
 import os
 import re
 import signal
@@ -29,12 +30,16 @@ from core.config_schema import ConfigValidationError, validate_agent_config, val
 from core.events import SystemEventStore
 from core.telemetry import read_telemetry
 
-from PySide6.QtCore import QFileSystemWatcher, QPointF, Qt, QProcess, QProcessEnvironment, QTimer, QUrl
+from PySide6.QtCore import (QEasingCurve, QFileSystemWatcher, QPointF, Property,
+                            QPropertyAnimation, QRectF, QSize, Qt, QProcess,
+                            QProcessEnvironment, QTimer, QUrl)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractButton,
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -57,10 +62,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplashScreen,
     QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -69,7 +78,7 @@ from PySide6.QtWidgets import (
 from command_intel import AdvancedCommandIntelPage
 
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 CONFIG_DIR = Path.home() / ".config/command-centre"
 OFFLINE_CONFIG = CONFIG_DIR / "offline_knowledge.json"
 OFFLINE_DB_FILE = CONFIG_DIR / "offline_knowledge.db"
@@ -83,7 +92,6 @@ CONTROL_QUEUE_FILE = CONFIG_DIR / "control_queue.json"
 TOOL_STATE_FILE = CONFIG_DIR / "tool_library_state.json"
 SOFTWARE_HISTORY_FILE = CONFIG_DIR / "software_history.json"
 SYSTEM_EVENTS_DB = CONFIG_DIR / "system_events.db"
-CACHYOS_PACKAGE_CATALOG = Path("/usr/lib/cachyos-pi/pkglist.yaml")
 COMMANDOS_CURATED_CATALOG = {
     "Audio": [
         "strawberry", "lollypop", "audacious", "elisa", "kwave", "audacity", "ardour", "lmms",
@@ -160,10 +168,10 @@ CURATED_CATEGORY_DESCRIPTIONS = {
 }
 DEPLOYMENT_STATE_FILE = CONFIG_DIR / "deployment_state.json"
 APP_DIR = Path(__file__).resolve().parent
-DEVELOPMENT_LOGO_FILE = APP_DIR / "ChatGPT Image Jul 9, 2026, 09_59_59 PM.png"
+DEVELOPMENT_LOGO_FILE = APP_DIR / "command-centre-icon.png"
 INSTALLED_LOGO_FILE = APP_DIR / "logo.png"
 LOGO_FILE = DEVELOPMENT_LOGO_FILE if DEVELOPMENT_LOGO_FILE.exists() else INSTALLED_LOGO_FILE
-SPLASH_FILE = Path.home() / "Desktop/splash screen.png"
+SPLASH_FILE = APP_DIR / "splash.png"
 INVENTORY_DIR = APP_DIR / "inventory"
 DEFAULT_DEPLOYMENTS_FILE = APP_DIR / "deployments/default_deployments.json"
 CURATED_TOOLS_FILE = APP_DIR / "tools/curated_tools.json"
@@ -171,6 +179,16 @@ FCC_REPOSITORY = "https://github.com/Alishahryar1/free-claude-code.git"
 FCC_AUDITED_COMMIT = "5ffa47fbc39d5d7b9ea82987c49ff79985be140f"
 RESOURCE_DIR = APP_DIR / "resources"
 COMMAND_WIDGET_DIR = RESOURCE_DIR / "command-widget"
+COMMAND_PDF_DIR = RESOURCE_DIR / "command-pdf"
+COMMAND_WIDGET_VERSION_FILE = COMMAND_WIDGET_DIR / "VERSION"
+COMMAND_WIDGET_VERSION = COMMAND_WIDGET_VERSION_FILE.read_text(encoding="utf-8").strip() if COMMAND_WIDGET_VERSION_FILE.is_file() else "Unknown"
+
+
+def safe_read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def harden_private_storage():
@@ -188,13 +206,30 @@ def harden_private_storage():
 
 
 MODULES = [
-    ("dashboard", "SY", "System Dashboard"),
-    ("tools", "TL", "Tool Library"),
-    ("command_apps", "CA", "Command Apps"),
-    ("command_code", "CT", "Command Terminal"),
-    ("intel", "CI", "Command Intel"),
-    ("offline", "OK", "Offline Knowledge"),
-    ("software", "SW", "Software Centre"),
+    ("dashboard", "dashboard", "System Dashboard"),
+    ("software", "package", "Software Centre"),
+    ("tools", "tools", "Tool Library"),
+    ("command_code", "terminal", "Command Terminal"),
+    ("offline", "book", "Offline Knowledge"),
+    ("command_apps", "apps", "Command Apps"),
+    ("intel", "brain", "Command Intel"),
+]
+
+MODULE_DESCRIPTIONS = {
+    "dashboard": "Health & telemetry",
+    "software": "Updates & packages",
+    "tools": "Installed utilities",
+    "command_code": "Command shell",
+    "offline": "Documentation",
+    "command_apps": "Built-in modules",
+    "intel": "AI recommendations",
+}
+
+MODULE_SECTIONS = [
+    ("SYSTEM", ("dashboard",)),
+    ("SOFTWARE", ("software",)),
+    ("TOOLS", ("tools", "command_code", "offline")),
+    ("APPLICATIONS", ("command_apps", "intel")),
 ]
 
 
@@ -517,10 +552,11 @@ class MetricCard(QFrame):
 
 
 class CockpitCard(QFrame):
-    def __init__(self, title):
+    def __init__(self, title, icon="◇", accent="#00AEEF"):
         super().__init__()
         self.setObjectName("card")
-        self.title = QLabel(title)
+        self.setProperty("accent", accent)
+        self.title = QLabel(f"{icon}   {title}")
         self.title.setObjectName("panelTitle")
         self.body = QLabel("--")
         self.body.setObjectName("muted")
@@ -530,6 +566,8 @@ class CockpitCard(QFrame):
         self.click_handler = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 7, 12, 7)
+        layout.setSpacing(4)
         self.content_layout = layout
         layout.addWidget(self.title)
         layout.addWidget(self.body)
@@ -591,13 +629,140 @@ class Sparkline(QWidget):
             painter.drawPolyline(QPolygonF(segment))
 
 
+class RadarWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self.setFixedSize(220, 94)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.advance)
+        self.timer.start(50)
+
+    def advance(self):
+        self.angle = (self.angle + 2) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        center = QPointF(50, 47)
+        painter.setPen(QPen(QColor("#164968"), 1))
+        for radius in (18, 34, 47):
+            painter.drawEllipse(center, radius, radius)
+        painter.drawLine(3, 47, 97, 47)
+        painter.drawLine(50, 0, 50, 94)
+        radians = self.angle * 3.14159265 / 180
+        endpoint = QPointF(center.x() + 47 * math.cos(radians), center.y() - 47 * math.sin(radians))
+        painter.setPen(QPen(QColor("#00AEEF"), 2))
+        painter.drawLine(center, endpoint)
+        painter.setBrush(QColor("#35D66B"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(76, 30), 2.5, 2.5)
+        painter.setPen(QColor("#E9F3FB"))
+        painter.setFont(QFont("Inter", 18, QFont.Bold))
+        painter.drawText(108, 35, time.strftime("%H:%M"))
+        painter.setFont(QFont("Inter", 9, QFont.DemiBold))
+        painter.setPen(QColor("#B5BDC6"))
+        painter.drawText(108, 55, time.strftime("%d %b %Y").upper())
+        painter.drawText(108, 73, "CAPE TOWN")
+
+
+class ReadinessGauge(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.score = 0
+        self.setFixedSize(142, 142)
+
+    def set_score(self, score):
+        self.score = max(0, min(100, int(score)))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(12, 12, -12, -12)
+        painter.setPen(QPen(QColor("#16344D"), 10))
+        painter.drawArc(rect, 0, 360 * 16)
+        color = QColor("#35D66B" if self.score >= 85 else "#00AEEF" if self.score >= 70 else "#F4B942")
+        painter.setPen(QPen(color, 10, Qt.SolidLine, Qt.RoundCap))
+        painter.drawArc(rect, 90 * 16, -int(360 * 16 * self.score / 100))
+        painter.setPen(QColor("#F4F7FA"))
+        painter.setFont(QFont("Inter", 29, QFont.Bold))
+        painter.drawText(0, 39, self.width(), 42, Qt.AlignCenter, f"{self.score}%")
+        painter.setPen(QColor("#B5BDC6"))
+        painter.setFont(QFont("Inter", 9, QFont.DemiBold))
+        painter.drawText(0, 78, self.width(), 25, Qt.AlignCenter, "MISSION READY")
+
+
+class SoftwareHealthGauge(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.score = 0
+        self.status = "CHECKING"
+        self.setFixedSize(116, 116)
+
+    def set_score(self, score):
+        self.score = max(0, min(100, int(score)))
+        self.status = "HEALTHY" if self.score >= 85 else "GOOD" if self.score >= 65 else "ATTENTION"
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(9, 9, -9, -9)
+        painter.setPen(QPen(QColor("#16344D"), 11))
+        painter.drawArc(rect, 0, 360 * 16)
+        color = "#42E978" if self.score >= 85 else "#22C8FF" if self.score >= 65 else "#FFBF32" if self.score >= 40 else "#FF5B64"
+        painter.setPen(QPen(QColor(color), 11, Qt.SolidLine, Qt.RoundCap))
+        painter.drawArc(rect, 90 * 16, -int(360 * 16 * self.score / 100))
+        painter.setPen(QColor("#F2F6FA"))
+        painter.setFont(QFont("Inter", 25, QFont.Bold))
+        painter.drawText(QRectF(0, self.height() / 2 - 25, self.width(), 34), Qt.AlignCenter, f"{self.score}%")
+        painter.setPen(QColor("#42E978" if self.score >= 65 else "#FFBF32"))
+        painter.setFont(QFont("Inter", 8, QFont.Bold))
+        painter.drawText(QRectF(0, self.height() / 2 + 8, self.width(), 18), Qt.AlignCenter, self.status)
+
+
+class SoftwareMetricCard(QFrame):
+    def __init__(self, icon, title, accent):
+        super().__init__()
+        self.setObjectName("softwareMetricCard")
+        self.setProperty("accent", accent)
+        self.setMaximumHeight(132)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(13, 10, 13, 10)
+        layout.setSpacing(3)
+        self.icon = QLabel(icon)
+        self.icon.setObjectName("softwareMetricIcon")
+        self.icon.setAlignment(Qt.AlignCenter)
+        self.icon.setFixedSize(34, 34)
+        self.title = QLabel(title)
+        self.title.setObjectName("softwareMetricTitle")
+        self.value = QLabel("—")
+        self.value.setObjectName("softwareMetricValue")
+        self.detail = QLabel("Checking…")
+        self.detail.setObjectName("softwareMetricDetail")
+        layout.addWidget(self.icon)
+        layout.addWidget(self.title)
+        layout.addWidget(self.value)
+        layout.addWidget(self.detail)
+
+    def set_state(self, value, detail, state="info"):
+        self.value.setText(str(value))
+        self.detail.setText(detail)
+        self.setProperty("state", state)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
 class TelemetryCard(QFrame):
-    def __init__(self, title, color="#49bfff"):
+    def __init__(self, title, color="#49bfff", icon="◈"):
         super().__init__()
         self.setObjectName("card")
-        self.setMaximumHeight(246)
+        self.setMaximumHeight(180)
         self.click_handler = None
-        self.title = QLabel(title)
+        self.setProperty("accent", color)
+        self.title = QLabel(f"{icon}   {title}")
         self.title.setObjectName("panelTitle")
         self.value = QLabel("--")
         self.value.setObjectName("metricValue")
@@ -605,20 +770,28 @@ class TelemetryCard(QFrame):
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.usage_bar = QProgressBar()
+        self.usage_bar.setObjectName("metricBar")
+        self.usage_bar.setProperty("accent", color)
+        self.usage_bar.setRange(0, 100)
+        self.usage_bar.setTextVisible(False)
+        self.usage_bar.setFixedHeight(7)
         self.sparkline = Sparkline(color)
-        self.sparkline.setMinimumHeight(41)
-        self.sparkline.setMaximumHeight(41)
+        self.sparkline.setMinimumHeight(22)
+        self.sparkline.setMaximumHeight(22)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 7, 12, 7)
+        layout.setSpacing(3)
         layout.addWidget(self.title)
         layout.addWidget(self.value)
+        layout.addWidget(self.usage_bar)
         layout.addWidget(self.detail)
         layout.addWidget(self.sparkline)
 
     def set_metric(self, value, detail, history_value):
         self.value.setText(value)
         self.detail.setText(detail)
+        self.usage_bar.setValue(max(0, min(100, int(float(history_value or 0)))))
         self.sparkline.add_value(history_value)
 
     def set_click_handler(self, handler):
@@ -638,17 +811,27 @@ class DashboardPage(QWidget):
         self.parent_window = parent_window
         self.last_telemetry_timestamp = None
         self.header = QLabel("--")
-        self.header.setObjectName("healthHeader")
+        self.header.setObjectName("heroStatus")
         self.header.setWordWrap(True)
         self.header.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
-        self.cpu = TelemetryCard("CPU", "#49bfff")
-        self.gpu = TelemetryCard("GPU", "#ad7cff")
-        self.memory = TelemetryCard("MEMORY", "#42d989")
-        self.storage_summary = TelemetryCard("STORAGE", "#f0b84b")
-        self.health = CockpitCard("SYSTEM HEALTH")
+        self.cpu = TelemetryCard("CPU", "#00AEEF", "▣")
+        self.gpu = TelemetryCard("GPU", "#35D66B", "▤")
+        self.memory = TelemetryCard("MEMORY", "#A55DFF", "▥")
+        self.storage_summary = TelemetryCard("STORAGE", "#F0B230", "▧")
+        self.health = CockpitCard("SYSTEM HEALTH", "♥", "#35D66B")
         self.health.setMaximumHeight(150)
-        self.readiness = CockpitCard("COMMANDOS READINESS")
+        self.readiness = CockpitCard("COMMAND STATUS", "◎", "#00AEEF")
+        self.readiness.setMinimumHeight(245)
+        self.readiness.setMaximumHeight(260)
+        self.readiness_gauge = ReadinessGauge()
+        self.readiness.content_layout.removeWidget(self.readiness.body)
+        readiness_content = QHBoxLayout()
+        readiness_content.setSpacing(18)
+        readiness_content.addWidget(self.readiness_gauge)
+        readiness_content.addWidget(self.readiness.body, 1)
+        self.readiness.body.setObjectName("readinessDetail")
+        self.readiness.content_layout.addLayout(readiness_content)
         self.readiness_bar = QProgressBar()
         self.readiness_bar.setRange(0, 100)
         self.readiness_bar.setTextVisible(True)
@@ -656,33 +839,56 @@ class DashboardPage(QWidget):
         readiness_details = QPushButton("VIEW SCORE BREAKDOWN")
         readiness_details.clicked.connect(self.show_readiness_breakdown)
         self.readiness.content_layout.addWidget(readiness_details)
-        self.power = CockpitCard("BATTERY & POWER")
-        self.network = CockpitCard("NETWORK HEALTH")
-        self.security = CockpitCard("SECURITY POSTURE")
-        self.storage_health = CockpitCard("DISK & SNAPSHOT HEALTH")
-        self.kernel_state = CockpitCard("KERNEL & DRIVER STATE")
+        self.intelligence = CockpitCard("COMMAND INTELLIGENCE", "✦", "#A55DFF")
+        self.intelligence.setMinimumHeight(245)
+        self.intelligence.setMaximumHeight(260)
+        self.intelligence.body.setTextFormat(Qt.RichText)
+        self.power = CockpitCard("BATTERY & POWER", "▥", "#35D66B")
+        self.network = CockpitCard("NETWORK HEALTH", "≋", "#00AEEF")
+        self.security = CockpitCard("SECURITY POSTURE", "◆", "#35D66B")
+        self.storage_health = CockpitCard("DISK & SNAPSHOT HEALTH", "▨", "#00AEEF")
+        self.kernel_state = CockpitCard("KERNEL & DRIVER STATE", ">_", "#8CB7D7")
         for card in (self.power, self.network, self.security, self.storage_health, self.kernel_state):
-            card.setMaximumHeight(140)
-        self.activity = CockpitCard("RECENT ACTIVITY")
-        self.activity.setMinimumHeight(180)
+            card.setMinimumHeight(112)
+            card.setMaximumHeight(122)
+        self.activity = CockpitCard("RECENT ACTIVITY", "◷", "#00AEEF")
+        self.activity.setMinimumHeight(301)
+        self.activity.content_layout.removeWidget(self.activity.body)
+        self.activity.body.hide()
+        self.activity_rows = QVBoxLayout()
+        self.activity_rows.setSpacing(3)
+        self.activity.content_layout.addLayout(self.activity_rows)
         timeline_button = QPushButton("VIEW FULL SYSTEM TIMELINE")
         timeline_button.clicked.connect(self.parent_window.show_system_timeline)
         self.activity.content_layout.addWidget(timeline_button)
-        self.alerts_frame, self.alerts_layout = self.panel("ALERTS & RECOMMENDATIONS")
-        self.alerts_frame.setMinimumHeight(210)
+        self.alerts_frame, self.alerts_layout = self.panel("⚠   ALERTS & RECOMMENDATIONS")
+        self.alerts_frame.setMinimumHeight(150)
+        self.alerts_frame.setMaximumHeight(160)
+        self.alerts_layout.setContentsMargins(12, 7, 12, 7)
+        self.alerts_layout.setSpacing(4)
         self.alerts_details = QPushButton("OPEN ACTION CENTRE")
+        self.alerts_details.setObjectName("alertAction")
+        self.alerts_details.setFixedHeight(22)
         self.alerts_details.clicked.connect(lambda: self.open_detail("alerts"))
-        self.quick_frame, quick_layout = self.panel("QUICK ACTIONS")
+        self.quick_frame, quick_layout = self.panel("◈   QUICK ACTIONS")
+        self.quick_frame.setMaximumHeight(130)
         actions = QGridLayout()
-        for index, (label, callback) in enumerate([
-            ("CHECK UPDATES", lambda: self.parent_window.open_module("software")),
-            ("OPEN TERMINAL", lambda: self.parent_window.open_module("command_code")),
-            ("SYSTEM INFORMATION", self.open_system_information),
-            ("TELEMETRY STATUS", self.show_telemetry_status),
+        actions.setSpacing(8)
+        for index, (label, standard_icon, callback) in enumerate([
+            ("CHECK UPDATES", QStyle.SP_BrowserReload, lambda: self.parent_window.open_module("software")),
+            ("OPEN TERMINAL", QStyle.SP_ComputerIcon, lambda: self.parent_window.open_module("command_code")),
+            ("SYSTEM INFORMATION", QStyle.SP_MessageBoxInformation, self.open_system_information),
+            ("TELEMETRY STATUS", QStyle.SP_DriveNetIcon, self.show_telemetry_status),
         ]):
-            button = QPushButton(label)
+            button = QToolButton()
+            button.setText(label)
+            button.setObjectName("quickActionButton")
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setIcon(self.style().standardIcon(standard_icon))
+            button.setIconSize(QSize(28, 28))
+            button.setMinimumHeight(62)
             button.clicked.connect(callback)
-            actions.addWidget(button, index // 2, index % 2)
+            actions.addWidget(button, 0, index)
         quick_layout.addLayout(actions)
 
         for key, card in {
@@ -695,10 +901,14 @@ class DashboardPage(QWidget):
             card.set_click_handler(lambda selected=key: self.open_detail(selected))
 
         metrics = QGridLayout()
+        metrics.setHorizontalSpacing(11)
+        metrics.setVerticalSpacing(11)
         for index, card in enumerate([self.cpu, self.gpu, self.memory, self.storage_summary]):
             metrics.addWidget(card, 0, index)
 
         status_grid = QGridLayout()
+        status_grid.setHorizontalSpacing(11)
+        status_grid.setVerticalSpacing(11)
         status_grid.addWidget(self.power, 0, 0)
         status_grid.addWidget(self.network, 0, 1)
         status_grid.addWidget(self.kernel_state, 0, 2)
@@ -708,30 +918,37 @@ class DashboardPage(QWidget):
         for column in range(3):
             status_grid.setColumnStretch(column, 1)
 
-        readiness_alerts = QGridLayout()
-        readiness_alerts.addWidget(self.readiness, 0, 0)
-        readiness_alerts.addWidget(self.alerts_frame, 0, 1)
-        readiness_alerts.setColumnStretch(0, 1)
-        readiness_alerts.setColumnStretch(1, 1)
+        command_overview = QGridLayout()
+        command_overview.setHorizontalSpacing(11)
+        command_overview.addWidget(self.readiness, 0, 0)
+        command_overview.addWidget(self.intelligence, 0, 1)
+        command_overview.setColumnStretch(0, 2)
+        command_overview.setColumnStretch(1, 1)
 
-        bottom = QGridLayout()
-        bottom.addWidget(self.activity, 0, 0)
-        bottom.addWidget(self.quick_frame, 0, 1)
-        bottom.setColumnStretch(0, 1)
-        bottom.setColumnStretch(1, 1)
+        lower_console = QGridLayout()
+        lower_console.setHorizontalSpacing(11)
+        lower_console.setVerticalSpacing(11)
+        lower_console.addWidget(self.activity, 0, 0, 2, 1)
+        lower_console.addWidget(self.alerts_frame, 0, 1)
+        lower_console.addWidget(self.quick_frame, 1, 1)
+        lower_console.setColumnStretch(0, 1)
+        lower_console.setColumnStretch(1, 1)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(14)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(11)
         layout.addWidget(self.hero_panel())
+        layout.addLayout(command_overview)
         layout.addLayout(metrics)
         layout.addLayout(status_grid)
-        layout.addLayout(readiness_alerts, 1)
-        layout.addLayout(bottom, 1)
+        layout.addLayout(lower_console, 1)
 
     def panel(self, title):
         frame = QFrame()
         frame.setObjectName("card")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(7)
         heading = QLabel(title)
         heading.setObjectName("panelTitle")
         layout.addWidget(heading)
@@ -741,22 +958,41 @@ class DashboardPage(QWidget):
         frame = QFrame()
         frame.setObjectName("hero")
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(18, 9, 18, 9)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 7, 16, 7)
+        layout.setSpacing(4)
 
         copy = QVBoxLayout()
-        eyebrow = QLabel("COMMAND CENTRE")
+        eyebrow = QLabel("⌖  WELCOME, COMMANDER")
         eyebrow.setObjectName("heroEyebrow")
-        title = QLabel("COMMAND OS")
+        title = QLabel("COMMAND CENTRE")
         title.setObjectName("heroTitle")
-        subtitle = QLabel("ONE SYSTEM, ONE MISSION")
+        subtitle = QLabel("ONE SYSTEM  •  ONE MISSION")
         subtitle.setObjectName("heroSubtitle")
         copy.addWidget(eyebrow)
         copy.addWidget(title)
         copy.addWidget(subtitle)
-        copy.addWidget(self.header)
+        self.mission_status = QHBoxLayout()
+        self.mission_status.setSpacing(7)
+        self.status_labels = {}
+        for key, text, state in [
+            ("system", "●  SYSTEM\nCHECKING", "warning"),
+            ("power", "⚡  POWER\nCHECKING", "success"),
+            ("uptime", "◷  UPTIME\n--", "info"),
+            ("updates", "↑  UPDATES\n--", "info"),
+            ("telemetry", "●  TELEMETRY\nCHECKING", "success"),
+            ("vpn", "◆  VPN\nCHECKING", "info"),
+            ("battery", "▥  BATTERY\nCHECKING", "success"),
+        ]:
+            label = QLabel(text)
+            label.setObjectName("missionChip")
+            label.setProperty("state", state)
+            self.status_labels[key] = label
+            self.mission_status.addWidget(label)
+        self.mission_status.addStretch()
+        copy.addLayout(self.mission_status)
 
         layout.addLayout(copy, 1)
+        layout.addWidget(RadarWidget())
         return frame
 
     def refresh(self, data, system):
@@ -774,10 +1010,17 @@ class DashboardPage(QWidget):
         updates = system.get("updates")
         updates_text = "updates unknown" if updates is None else f"{updates} updates"
         telemetry_state = "LIVE" if data else "UNAVAILABLE"
-        self.header.setText(
-            f"SYSTEM  {health}   ·   POWER  {metric_value(data, 'power_profile_label', 'Unknown').upper()}   ·   "
-            f"UPTIME  {system.get('uptime', '--').replace('up ', '').upper()}   ·   {updates_text.upper()}   ·   TELEMETRY  {telemetry_state}"
-        )
+        self.status_labels["system"].setText(f"●  SYSTEM\n{health}")
+        self.status_labels["power"].setText(f"⚡  POWER\n{metric_value(data, 'power_profile_label', 'Unknown').upper()}")
+        self.status_labels["uptime"].setText(f"◷  UPTIME\n{system.get('uptime', '--').replace('up ', '').upper()}")
+        self.status_labels["updates"].setText(f"↑  UPDATES\n{updates_text.upper()}")
+        self.status_labels["telemetry"].setText(f"●  TELEMETRY\n{telemetry_state}")
+        self.status_labels["vpn"].setText(f"◆  VPN\n{str(data.get('vpn_status', 'UNKNOWN')).upper()}")
+        self.status_labels["battery"].setText(f"▥  BATTERY\n{data.get('battery_percent', '--')}%")
+        self.status_labels["system"].setProperty("state", "success" if health == "HEALTHY" else "critical" if health == "CRITICAL" else "warning")
+        for label in self.status_labels.values():
+            label.style().unpolish(label)
+            label.style().polish(label)
 
         self.cpu.set_metric(
             f"{float(data.get('cpu_usage') or 0):.1f}%",
@@ -807,8 +1050,10 @@ class DashboardPage(QWidget):
         self.health.set_text("\n".join(self.health_lines(data, system)))
         score, deductions, readiness = self.readiness_result(data, system)
         self.readiness_bar.setValue(score)
+        self.readiness_gauge.set_score(score)
         self.readiness.set_text("\n".join(readiness))
         self.readiness_deductions = deductions
+        self.intelligence.set_text(self.intelligence_summary(data, system, issues))
         battery = system.get("battery", {})
         self.power.set_text(
             f"{data.get('battery_percent', '--')}% · {battery.get('status', data.get('battery_status', 'Unknown'))}\n"
@@ -830,12 +1075,76 @@ class DashboardPage(QWidget):
             f"Root {data.get('storage_percent', '--')}% · {system.get('storage_health', 'Unknown')}\n"
             f"Snapshots {system.get('snapshot', 'Unavailable')}\nFilesystem {system.get('filesystem', 'Unknown')}"
         )
+        boot_time = str(system.get("boot_time", "--"))
+        boot_total = re.search(r"=\s*(.+)$", boot_time)
+        boot_summary = boot_total.group(1) if boot_total else boot_time
         self.kernel_state.set_text(
             f"Kernel {system.get('kernel', '--')}\nNVIDIA {system.get('gpu_driver', 'not detected')} · {system.get('gpu_state', 'unknown')}\n"
-            f"Boot {system.get('boot_time', '--')} · Reboot {system.get('reboot_required', 'not required')}"
+            f"Boot {boot_summary} · Reboot {system.get('reboot_required', 'not required')}"
         )
         self.render_alerts(issues)
-        self.activity.set_text("\n".join(system.get("activity", ["No recent activity recorded."])))
+        self.render_activity(system.get("activity", ["No recent activity recorded."]))
+
+    def intelligence_summary(self, data, system, issues):
+        updates = system.get("updates") or 0
+        snapshot = system.get("snapshot", "Unavailable")
+        gpu_power = system.get("gpu_power", "--")
+        battery = system.get("battery", {})
+        battery_percent = data.get("battery_percent", "--")
+        if updates:
+            estimate = max(2, round(updates * 0.25))
+            reboot = "No reboot is currently expected" if system.get("reboot_required") != "required" else "A reboot is already pending"
+            recommendation = f"Install {updates} available updates"
+            estimate_text = f"Estimated time: {estimate} minutes · {reboot}"
+        elif issues:
+            recommendation = issues[0][1]
+            estimate_text = "Review the evidence before applying changes"
+        else:
+            recommendation = "No immediate action required"
+            estimate_text = "The system is within its operating thresholds"
+        backup_note = "Create a Btrfs snapshot before updating" if snapshot in ("Unavailable", "None found") else "Snapshot protection is available"
+        return (
+            "<div style='line-height:125%;'>"
+            "<span style='color:#A55DFF; font-weight:700;'>✦ RECOMMENDATION</span><br>"
+            f"<span style='color:#F2F6FA; font-size:15px; font-weight:700;'>{html.escape(recommendation)}</span><br>"
+            f"<span style='color:#B5BDC6;'>{html.escape(estimate_text)}</span>"
+            "<hr style='color:#16344D;'>"
+            "<span style='color:#35D66B; font-weight:700;'>⚡ POWER</span><br>"
+            f"Battery {battery_percent}% · GPU idle draw {html.escape(str(gpu_power))}"
+            "<hr style='color:#16344D;'>"
+            "<span style='color:#00AEEF; font-weight:700;'>◎ NEXT ACTION</span><br>"
+            f"<span style='color:#F2F6FA; font-weight:700;'>{html.escape(backup_note)}</span>"
+            "</div>"
+        )
+
+    def render_activity(self, entries):
+        while self.activity_rows.count():
+            item = self.activity_rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for entry in entries[:5]:
+            parts = str(entry).split(maxsplit=2)
+            stamp = parts[0] if parts and re.fullmatch(r"\d{1,2}:\d{2}", parts[0]) else "--:--"
+            category = parts[1] if len(parts) > 1 else "SYSTEM"
+            message = parts[2] if len(parts) > 2 else str(entry)
+            row = QFrame()
+            row.setObjectName("activityRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(9, 3, 9, 3)
+            time_label = QLabel(stamp)
+            time_label.setObjectName("activityTime")
+            category_label = QLabel(category)
+            category_label.setObjectName("activityCategory")
+            message_label = QLabel(message)
+            message_label.setObjectName("activityMessage")
+            detail = QVBoxLayout()
+            detail.setContentsMargins(0, 0, 0, 0)
+            detail.setSpacing(0)
+            detail.addWidget(category_label)
+            detail.addWidget(message_label)
+            row_layout.addWidget(time_label, 0, Qt.AlignTop)
+            row_layout.addLayout(detail, 1)
+            self.activity_rows.addWidget(row)
 
     def open_detail(self, key):
         data = getattr(self, "latest_data", {})
@@ -949,7 +1258,7 @@ class DashboardPage(QWidget):
         if system.get("snapshot") in ("Unavailable", "None found"): deduct("No verified snapshot", 5, system.get("snapshot", "Unknown"))
         score = max(0, score)
         lines = [
-            f"COMMAND OS READINESS                         {score}%",
+            f"{'MISSION READY' if score >= 80 else 'MISSION REVIEW'}                         {score}%",
             f"SYSTEM       {'READY' if data and failed == 0 else 'WARNING':<10} {failed} failed service(s)",
             f"THERMALS     {'READY' if max(cpu_temp, gpu_temp) < 70 else 'WARNING':<10} Peak {max(cpu_temp, gpu_temp):.0f}°C",
             f"SECURITY     {'READY' if system.get('firewall') == 'Enabled' and not updates else 'WARNING':<10} {updates} update(s)",
@@ -961,12 +1270,59 @@ class DashboardPage(QWidget):
         return score, deductions, lines
 
     def show_readiness_breakdown(self):
+        data = getattr(self, "latest_data", {})
+        system = getattr(self, "latest_system", {})
+        security = system.get("security", {})
+        updates = system.get("updates") or 0
+        storage = float(data.get("storage_percent") or 0)
+        battery = int(float(data.get("battery_percent") or 100))
+        categories = [
+            ("SECURITY", max(0, 100 - (25 if system.get("firewall") != "Enabled" else 0) - (10 if security.get("secure_boot") == "Disabled" else 0) - (15 if security.get("encryption") == "Disabled" else 0))),
+            ("STORAGE", max(0, min(100, int(110 - storage)))),
+            ("DRIVERS", 100 if system.get("gpu_driver") not in ("unknown", "not detected") else 55),
+            ("UPDATES", max(0, 100 - updates * 3)),
+            ("BATTERY", battery),
+            ("BACKUPS", 20 if system.get("snapshot") in ("Unavailable", "None found") else 100),
+            ("NETWORK", 100 if system.get("connection") not in ("Offline", "Unknown", None) else 20),
+            ("INTELLIGENCE", 100),
+        ]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Command Readiness Breakdown")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+        title = QLabel("COMMAND READINESS")
+        title.setObjectName("heroTitle")
+        score = self.readiness_gauge.score
+        summary = QLabel(f"{score}%   {'MISSION READY' if score >= 80 else 'MISSION REVIEW'}")
+        summary.setObjectName("healthHeader")
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        for label, value in categories:
+            row = QHBoxLayout()
+            name = QLabel(label)
+            name.setObjectName("panelTitle")
+            name.setMinimumWidth(170)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(value)
+            bar.setFormat(f"{value}%")
+            row.addWidget(name)
+            row.addWidget(bar, 1)
+            layout.addLayout(row)
+        evidence = QPlainTextEdit()
+        evidence.setReadOnly(True)
+        evidence.setObjectName("textPanel")
         deductions = getattr(self, "readiness_deductions", [])
-        if deductions:
-            detail = "\n".join(f"−{points:>2}  {label}\n     Evidence: {evidence}" for label, points, evidence in deductions)
-        else:
-            detail = "No readiness deductions are currently active."
-        QMessageBox.information(self, "Command OS Readiness Breakdown", detail)
+        evidence.setPlainText("WHY THE SCORE ISN'T 100%\n\n" + ("\n\n".join(
+            f"−{points}%  {label}\nEvidence: {detail}" for label, points, detail in deductions
+        ) or "No active deductions."))
+        layout.addWidget(evidence, 1)
+        close = QPushButton("CLOSE READINESS BREAKDOWN")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.setWindowState(Qt.WindowMaximized)
+        dialog.exec()
 
     def render_alerts(self, issues):
         while self.alerts_layout.count() > 1:
@@ -985,11 +1341,18 @@ class DashboardPage(QWidget):
         for severity, message, module_id, action in issues[:5]:
             row = QFrame()
             row.setObjectName("alertRow")
+            row.setProperty("severity", severity.lower())
             row_layout = QHBoxLayout(row)
-            label = QLabel(f"{severity:<9}  {message}")
+            row_layout.setContentsMargins(7, 1, 7, 1)
+            row_layout.setSpacing(6)
+            icon = "▲" if severity in ("WARNING", "CRITICAL") else "ⓘ"
+            label = QLabel(f"{icon}   {severity:<9}  {message}")
+            label.setObjectName("alertText")
             label.setWordWrap(True)
             row_layout.addWidget(label, 1)
             button = QPushButton(action)
+            button.setObjectName("alertAction")
+            button.setFixedHeight(22)
             button.clicked.connect(lambda checked=False, target=module_id: self.parent_window.open_module(target))
             row_layout.addWidget(button)
             self.alerts_layout.addWidget(row)
@@ -1066,6 +1429,24 @@ class ControlPage(QWidget):
         self.result = QTextEdit()
         self.result.setReadOnly(True)
         self.result.setObjectName("textPanel")
+        self.result.setVisible(False)
+        self.result.textChanged.connect(
+            lambda: self.result.setVisible(bool(self.result.toPlainText().strip()))
+        )
+        for widget in (
+            self.update_list, self.history_list, self.package_list, self.cachyos_list,
+            self.orphan_list, self.foreign_list, self.installed_kernels,
+        ):
+            widget.setObjectName("softwareList")
+        for widget in (self.cachyos_search, self.package_search):
+            widget.setObjectName("softwareSearch")
+        for widget in (self.cachyos_category, self.available_kernels):
+            widget.setObjectName("softwareCombo")
+        for widget in (
+            self.status, self.tools_status, self.cachyos_pi_status, self.orphan_summary,
+            self.foreign_summary, self.kernel_status, self.health_status, self.sources_status,
+        ):
+            widget.setObjectName("softwareStatusBlock")
 
         layout = QVBoxLayout(self)
         title = QLabel("SYSTEM CONTROL")
@@ -1602,7 +1983,7 @@ class SoftwarePage(QWidget):
         self.update_records = []
         self.software_history = self.load_history()
         self.health_header = QLabel("Collecting software state…")
-        self.health_header.setObjectName("healthHeader")
+        self.health_header.setObjectName("softwareAttention")
         self.health_header.setWordWrap(True)
         self.overview_status = QLabel("--")
         self.overview_status.setObjectName("controlState")
@@ -1645,6 +2026,18 @@ class SoftwarePage(QWidget):
         self.package_search.returnPressed.connect(self.search_packages)
         self.package_list = QListWidget()
         self.package_list.itemDoubleClicked.connect(lambda _: self.install_selected_package())
+        self.orphan_packages = []
+        self.foreign_packages = []
+        self.orphan_list = QListWidget()
+        self.orphan_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.foreign_list = QListWidget()
+        self.foreign_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.orphan_summary = QLabel("No orphan scan completed yet.")
+        self.orphan_summary.setObjectName("muted")
+        self.orphan_summary.setWordWrap(True)
+        self.foreign_summary = QLabel("No foreign-package scan completed yet.")
+        self.foreign_summary.setObjectName("muted")
+        self.foreign_summary.setWordWrap(True)
         self.kernel_status = QLabel("--")
         self.kernel_status.setObjectName("muted")
         self.available_kernels = QComboBox()
@@ -1654,19 +2047,52 @@ class SoftwarePage(QWidget):
         self.result.setObjectName("textPanel")
 
         layout = QVBoxLayout(self)
-        title = QLabel("SOFTWARE CENTRE")
-        title.setObjectName("healthHeader")
-        layout.addWidget(title)
-        layout.addWidget(self.health_header)
-        tabs = QTabWidget()
-        tabs.addTab(self.overview_panel(), "Overview")
-        tabs.addTab(self.updates_page(), "Updates")
-        tabs.addTab(self.package_panel(), "Packages")
-        tabs.addTab(self.kernel_panel(), "Kernels")
-        tabs.addTab(self.health_page(), "Health & Sources")
-        tabs.addTab(self.history_page(), "History")
-        layout.addWidget(tabs)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        header = QFrame()
+        header.setObjectName("softwareHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 8, 16, 8)
+        header_copy = QVBoxLayout()
+        header_copy.setSpacing(5)
+        title = QLabel("▣   SOFTWARE CENTRE")
+        title.setObjectName("softwarePageTitle")
+        header_copy.addWidget(title)
+        subtitle = QLabel("PACKAGE HEALTH  •  UPDATES  •  RECOVERY")
+        subtitle.setObjectName("softwareSubtitle")
+        header_copy.addWidget(subtitle)
+        header_copy.addWidget(self.health_header)
+        header_copy.addSpacing(5)
+        self.software_chip_row = QHBoxLayout()
+        self.software_chip_row.setSpacing(6)
+        self.software_chips = {}
+        for key, text in [
+            ("updates", "↻ UPDATES\n—"), ("aur", "◇ AUR\n—"), ("flatpak", "▣ FLATPAK\n—"),
+            ("orphans", "⚠ ORPHANS\n—"), ("reboot", "⏻ REBOOT\n—"),
+        ]:
+            chip = QLabel(text)
+            chip.setObjectName("softwareStatusChip")
+            chip.setProperty("state", "info")
+            self.software_chips[key] = chip
+            self.software_chip_row.addWidget(chip)
+        self.software_chip_row.addStretch()
+        header_copy.addLayout(self.software_chip_row)
+        header_layout.addLayout(header_copy, 1)
+        header_layout.addWidget(RadarWidget())
+        layout.addWidget(header)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("softwareTabs")
+        self.tabs.addTab(self.overview_panel(), "Overview")
+        self.tabs.addTab(self.updates_page(), "Updates")
+        self.tabs.addTab(self.package_panel(), "Packages")
+        self.tabs.addTab(self.package_cleanup_page(), "Orphans & Foreign")
+        self.tabs.addTab(self.kernel_panel(), "Kernels")
+        self.tabs.addTab(self.health_page(), "Health & Sources")
+        self.tabs.addTab(self.history_page(), "History")
+        layout.addWidget(self.tabs)
+        self.result.setMaximumHeight(105)
         layout.addWidget(self.result)
+        self.result.hide()
         self.software_poll = QTimer(self)
         self.software_poll.timeout.connect(self.finish_refresh)
         self.software_poll.start(100)
@@ -1674,35 +2100,259 @@ class SoftwarePage(QWidget):
     def overview_panel(self):
         page = QWidget()
         page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(4, 8, 4, 4)
-        frame, layout = self.panel("Software State")
-        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        layout.addWidget(self.overview_status)
-        buttons = QHBoxLayout()
-        for label, handler in [("REVIEW UPDATES", self.show_update_review), ("UPDATE ALL", self.update_system), ("RUN HEALTH CHECK", self.refresh)]:
-            button = QPushButton(label)
-            button.clicked.connect(handler)
-            buttons.addWidget(button)
-        buttons.addStretch()
-        layout.addLayout(buttons)
-        impact, impact_layout = self.panel("Impact Analysis")
-        impact_layout.addWidget(self.impact_status)
-        layout.addWidget(impact)
-        protection, protection_layout = self.panel("Pre-update Protection")
-        protection_layout.addWidget(self.snapshot_status)
-        snapshot = QPushButton("CREATE SNAPSHOT")
-        snapshot.clicked.connect(self.create_snapshot)
-        protection_layout.addWidget(snapshot)
-        layout.addWidget(protection)
-        page_layout.addWidget(frame, 0, Qt.AlignTop)
+        page_layout.setContentsMargins(4, 7, 4, 4)
+        page_layout.setSpacing(10)
+
+        self.software_metric_grid = QGridLayout()
+        self.software_metric_grid.setSpacing(8)
+        metric_specs = [
+            ("updates", "↻", "UPDATES", "#F5B83D"), ("aur", "◇", "AUR", "#35D66B"),
+            ("flatpak", "▣", "FLATPAK", "#16B9F3"), ("orphans", "⚠", "ORPHANS", "#F0A72B"),
+            ("foreign", "◎", "FOREIGN", "#A65DFF"), ("reboot", "⏻", "REBOOT", "#35D66B"),
+        ]
+        self.software_metrics = {key: SoftwareMetricCard(icon, title, accent) for key, icon, title, accent in metric_specs}
+        self.reflow_software_metrics(6)
+        page_layout.addLayout(self.software_metric_grid)
+
+        health_intelligence = QGridLayout()
+        health_intelligence.setSpacing(10)
+        health, health_layout = self.panel("◈   SOFTWARE HEALTH")
+        health.setMaximumHeight(210)
+        health_content = QHBoxLayout()
+        health_content.setContentsMargins(4, 0, 4, 0)
+        health_content.setSpacing(12)
+        self.software_health_gauge = SoftwareHealthGauge()
+        gauge_column = QVBoxLayout()
+        gauge_column.setContentsMargins(0, 0, 0, 0)
+        gauge_column.setSpacing(0)
+        self.software_health_trend = QLabel("Establishing health trend…")
+        self.software_health_trend.setObjectName("softwareTrend")
+        self.software_health_trend.setAlignment(Qt.AlignCenter)
+        gauge_column.addWidget(self.software_health_gauge, 0, Qt.AlignCenter)
+        gauge_column.addWidget(self.software_health_trend)
+        self.software_health_checklist = QLabel("Calculating software health…")
+        self.software_health_checklist.setObjectName("softwareChecklist")
+        self.software_health_checklist.setTextFormat(Qt.RichText)
+        self.software_health_checklist.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        health_content.addLayout(gauge_column)
+        health_content.addWidget(self.software_health_checklist, 1, Qt.AlignVCenter)
+        health_layout.addLayout(health_content)
+        health_details = QPushButton("VIEW HEALTH DETAILS")
+        health_details.setObjectName("softwareFooterButton")
+        health_details.clicked.connect(lambda: self.tabs.setCurrentIndex(5))
+        health_layout.addWidget(health_details)
+        health_intelligence.addWidget(health, 0, 0)
+
+        intelligence, intelligence_layout = self.panel("✦   COMMAND INTELLIGENCE")
+        intelligence.setMaximumHeight(210)
+        intelligence_grid = QGridLayout()
+        intelligence_grid.setSpacing(7)
+        self.software_intelligence = {}
+        intelligence_specs = [
+            ("recommendation", "✦", "AI RECOMMENDATION", "REVIEW UPDATES", self.show_update_review),
+            ("analysis", "☷", "UPDATE ANALYSIS", "VIEW IMPACT", lambda: self.tabs.setCurrentIndex(1)),
+            ("action", "◎", "NEXT BEST ACTION", "TAKE ACTION", self.next_software_action),
+        ]
+        for column, (key, icon, title, action, handler) in enumerate(intelligence_specs):
+            mini = QFrame(); mini.setObjectName("softwareMiniPanel")
+            mini_layout = QVBoxLayout(mini); mini_layout.setContentsMargins(12, 10, 12, 10); mini_layout.setSpacing(7)
+            heading = QLabel(f"{icon}  {title}"); heading.setObjectName("softwareMiniTitle")
+            badge = QLabel("CHECKING"); badge.setObjectName("softwareIntelBadge"); badge.setProperty("state", "info")
+            body = QLabel("Checking…"); body.setObjectName("softwareMiniBody"); body.setWordWrap(True)
+            detail = QLabel(""); detail.setObjectName("softwareMiniDetail"); detail.setWordWrap(True)
+            button = QPushButton(action); button.setObjectName("softwareActionButton"); button.clicked.connect(handler)
+            title_row = QHBoxLayout(); title_row.addWidget(heading); title_row.addStretch(); title_row.addWidget(badge)
+            mini_layout.addLayout(title_row); mini_layout.addWidget(body); mini_layout.addWidget(detail); mini_layout.addStretch(); mini_layout.addWidget(button)
+            intelligence_grid.addWidget(mini, 0, column)
+            self.software_intelligence[key] = (body, detail, badge, button)
+        intelligence_layout.addLayout(intelligence_grid)
+        health_intelligence.addWidget(intelligence, 0, 1)
+        health_intelligence.setColumnStretch(0, 2)
+        health_intelligence.setColumnStretch(1, 3)
+        page_layout.addLayout(health_intelligence)
+
+        impact_protection = QGridLayout(); impact_protection.setSpacing(10)
+        impact, impact_layout = self.panel("▥   IMPACT ANALYSIS")
+        impact.setMaximumHeight(175)
+        impact_grid = QGridLayout(); impact_grid.setSpacing(7)
+        self.impact_columns = {}
+        for column, (key, title, color) in enumerate([("low", "LOW IMPACT", "#35D66B"), ("medium", "MEDIUM IMPACT", "#F5B83D"), ("high", "HIGH IMPACT", "#F05B5B")]):
+            box = QFrame(); box.setObjectName("impactColumn"); box.setProperty("accent", color)
+            box_layout = QVBoxLayout(box); box_layout.setContentsMargins(10, 8, 10, 8); box_layout.setSpacing(6)
+            label = QLabel(title); label.setObjectName("softwareMetricTitle")
+            bar = QProgressBar(); bar.setObjectName("impactBar"); bar.setProperty("impact", key); bar.setRange(0, 100); bar.setTextVisible(False)
+            value = QLabel("—"); value.setObjectName("softwareImpactValue")
+            status = QLabel("0% OF UPDATES"); status.setObjectName("impactStatus")
+            value_row = QHBoxLayout(); value_row.setContentsMargins(0, 0, 0, 0)
+            value_row.addWidget(value); value_row.addStretch(); value_row.addWidget(status, 0, Qt.AlignBottom)
+            box_layout.addWidget(label); box_layout.addWidget(bar); box_layout.addLayout(value_row)
+            impact_grid.addWidget(box, 0, column)
+            self.impact_columns[key] = (value, bar, status)
+        impact_layout.addLayout(impact_grid)
+        impact_note = QLabel("ⓘ  High impact indicates core system, kernel, driver, boot, or filesystem packages. It is not a prediction of failure.")
+        impact_note.setObjectName("softwareNote"); impact_note.setWordWrap(True); impact_layout.addWidget(impact_note)
+        impact_protection.addWidget(impact, 0, 0)
+
+        protection, protection_layout = self.panel("◈   PRE-UPDATE PROTECTION")
+        protection.setMaximumHeight(175)
+        protection_content = QHBoxLayout()
+        protection_content.setSpacing(16)
+        self.software_protection = QLabel("Reading snapshot status…")
+        self.software_protection.setObjectName("softwareChecklist")
+        self.software_protection.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        protection_action = QVBoxLayout()
+        protection_action.setSpacing(5)
+        protection_icon = QLabel("◈+"); protection_icon.setObjectName("protectionIcon"); protection_icon.setAlignment(Qt.AlignCenter)
+        self.protection_explanation = QLabel("Checking rollback protection…")
+        self.protection_explanation.setObjectName("protectionExplanation")
+        self.protection_explanation.setWordWrap(True); self.protection_explanation.setAlignment(Qt.AlignCenter)
+        self.snapshot_overview_button = QPushButton("CREATE SNAPSHOT")
+        self.snapshot_overview_button.setObjectName("primaryButton")
+        self.snapshot_overview_button.setMinimumHeight(30)
+        self.snapshot_overview_button.clicked.connect(self.snapshot_overview_action)
+        protection_action.addWidget(protection_icon); protection_action.addWidget(self.protection_explanation, 1); protection_action.addWidget(self.snapshot_overview_button)
+        protection_divider = QFrame(); protection_divider.setObjectName("protectionDivider"); protection_divider.setFrameShape(QFrame.VLine)
+        protection_content.addWidget(self.software_protection, 2); protection_content.addWidget(protection_divider); protection_content.addLayout(protection_action, 1)
+        protection_layout.addLayout(protection_content)
+        impact_protection.addWidget(protection, 0, 1)
+        impact_protection.setColumnStretch(0, 1); impact_protection.setColumnStretch(1, 1)
+        page_layout.addLayout(impact_protection)
+
+        lower = QGridLayout(); lower.setSpacing(10)
+        activity, activity_layout = self.panel("◷   RECENT SOFTWARE ACTIVITY")
+        activity.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        activity.setMaximumHeight(310)
+        activity_layout.setAlignment(Qt.AlignTop)
+        self.software_activity_layout = QVBoxLayout(); self.software_activity_layout.setSpacing(5)
+        self.software_activity_layout.setAlignment(Qt.AlignTop)
+        activity_layout.addLayout(self.software_activity_layout)
+        timeline = QPushButton("VIEW FULL TIMELINE"); timeline.setObjectName("softwareFooterButton"); timeline.clicked.connect(lambda: self.tabs.setCurrentIndex(6)); activity_layout.addWidget(timeline)
+        lower.addWidget(activity, 0, 0)
+        quick, quick_layout = self.panel("⚡   QUICK ACTIONS")
+        quick.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        quick.setMaximumHeight(310)
+        quick_layout.setAlignment(Qt.AlignTop)
+        action_grid = QGridLayout(); action_grid.setHorizontalSpacing(8); action_grid.setVerticalSpacing(10)
+        actions = [
+            ("REVIEW UPDATES", QStyle.SP_BrowserReload, "update", self.show_update_review),
+            ("UPDATE ALL", QStyle.SP_ArrowUp, "update", self.update_system),
+            ("HEALTH CHECK", QStyle.SP_DialogApplyButton, "health", self.refresh),
+            ("REMOVE ORPHANS", QStyle.SP_TrashIcon, "cleanup", self.remove_all_orphans),
+            ("CLEAN CACHE", QStyle.SP_DriveHDIcon, "cleanup", lambda: self.run_maintenance("Clean Package Cache", "sudo paccache -r")),
+            ("MANAGE KERNELS", QStyle.SP_ComputerIcon, "system", lambda: self.tabs.setCurrentIndex(4)),
+        ]
+        action_colors = {"update": "#2BC4FF", "health": "#35D66B", "cleanup": "#F0B230", "system": "#A55DFF"}
+        for index, (label, icon, category, handler) in enumerate(actions):
+            button = QToolButton(); button.setObjectName("softwareActionTile"); button.setText(label)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setFixedHeight(92)
+            button.setProperty("category", category)
+            button.setProperty("hierarchy", "primary" if label == "UPDATE ALL" else "danger" if label == "REMOVE ORPHANS" else "secondary")
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); button.setIcon(self.monochrome_icon(icon, action_colors[category])); button.setIconSize(QSize(32, 32))
+            button.clicked.connect(handler); action_grid.addWidget(button, index // 3, index % 3)
+        for column in range(3):
+            action_grid.setColumnStretch(column, 1)
+        quick_layout.addLayout(action_grid)
+        lower.addWidget(quick, 0, 1)
+        lower.setColumnStretch(0, 1); lower.setColumnStretch(1, 1)
+        page_layout.addLayout(lower)
         page_layout.addStretch(1)
         return page
 
+    def reflow_software_metrics(self, columns):
+        if not hasattr(self, "software_metric_grid"):
+            return
+        self.software_metric_columns = columns
+        while self.software_metric_grid.count():
+            self.software_metric_grid.takeAt(0)
+        for index, key in enumerate(("updates", "aur", "flatpak", "orphans", "foreign", "reboot")):
+            self.software_metric_grid.addWidget(self.software_metrics[key], index // columns, index % columns)
+        for column in range(columns):
+            self.software_metric_grid.setColumnStretch(column, 1)
+
+    def monochrome_icon(self, standard_icon, color="#C7E9F7"):
+        pixmap = self.style().standardIcon(standard_icon).pixmap(32, 32)
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), QColor(color))
+        painter.end()
+        return QIcon(pixmap)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "software_metric_grid"):
+            columns = 6 if self.width() >= 1160 else 3
+            if columns != getattr(self, "software_metric_columns", 0):
+                self.reflow_software_metrics(columns)
+
+    def snapshot_overview_action(self):
+        snapshot = getattr(self, "last_software_state", {}).get("snapshot", self.snapshot_state())
+        if snapshot.get("configured"):
+            self.create_snapshot()
+        else:
+            self.tabs.setCurrentIndex(5)
+            self.result.setPlainText("Configure Snapper or Timeshift before relying on pre-update rollback protection.")
+
+    def next_software_action(self):
+        state = getattr(self, "last_software_state", {})
+        if not state:
+            self.refresh()
+        elif not state.get("snapshot", {}).get("configured") or any(record["impact"] == "HIGH" for record in self.update_records):
+            self.snapshot_overview_action()
+        elif state.get("orphans") and not self.update_records:
+            self.tabs.setCurrentIndex(3)
+        elif self.update_records:
+            self.tabs.setCurrentIndex(1)
+        else:
+            self.result.setPlainText("Software health is good. No immediate action is required.")
+
+    def software_health_score(self, state, high_impact):
+        score = 100
+        total_updates = len(state["repo"]) + len(state["aur"])
+        score -= min(10, total_updates // 3)
+        score -= min(10, high_impact * 3)
+        score -= min(8, len(state["orphans"]) // 2)
+        if state["lock"] != "CLEAR":
+            score -= 15
+        if not state["snapshot"]["configured"]:
+            score -= 8
+        if state["reboot"]:
+            score -= 5
+        return max(0, score)
+
+    def render_software_activity(self):
+        while self.software_activity_layout.count():
+            item = self.software_activity_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        records = self.software_history[:4]
+        if not records:
+            empty = QLabel("Monitoring software activity…")
+            empty.setObjectName("softwareNote")
+            self.software_activity_layout.addWidget(empty)
+            return
+        for record in records:
+            row = QFrame(); row.setObjectName("softwareActivityRow")
+            row_layout = QHBoxLayout(row); row_layout.setContentsMargins(10, 10, 10, 10); row_layout.setSpacing(10)
+            timestamp = str(record.get("timestamp", "--"))
+            stamp = QLabel(timestamp[11:16] if len(timestamp) >= 16 else timestamp)
+            stamp.setObjectName("softwareActivityTime")
+            action_text = str(record.get("action", "Software action"))
+            category = "SNAPSHOT" if "snapshot" in action_text.lower() else "REMOVE" if "remove" in action_text.lower() else "INSTALL" if "install" in action_text.lower() else "UPDATE"
+            category_label = QLabel(category); category_label.setObjectName("softwareActivityCategory"); category_label.setProperty("category", category.lower())
+            description = QLabel(action_text); description.setObjectName("softwareActivityDescription")
+            row_layout.addWidget(stamp); row_layout.addWidget(category_label); row_layout.addWidget(description, 1)
+            self.software_activity_layout.addWidget(row)
+
     def updates_page(self):
         page = QWidget()
+        page.setObjectName("softwareSubPage")
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(10)
+        layout.addWidget(self.software_section_header("SYSTEM UPDATES", "REVIEW  •  PROTECT  •  DEPLOY", "↻"))
         layout.addWidget(self.update_panel())
-        heading = QLabel("FULL SYSTEM UPGRADE REVIEW")
+        heading = QLabel("▥   FULL SYSTEM UPGRADE REVIEW")
         heading.setObjectName("panelTitle")
         layout.addWidget(heading)
         layout.addWidget(self.update_list)
@@ -1714,12 +2364,16 @@ class SoftwarePage(QWidget):
 
     def health_page(self):
         page = QWidget()
+        page.setObjectName("softwareSubPage")
         layout = QVBoxLayout(page)
-        health, health_layout = self.panel("Software Health")
+        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(10)
+        layout.addWidget(self.software_section_header("HEALTH & SOURCES", "DATABASE  •  SOURCES  •  MAINTENANCE", "◈"))
+        health, health_layout = self.panel("◈   SOFTWARE HEALTH")
         health.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         health_layout.addWidget(self.health_status)
         layout.addWidget(health)
-        sources, sources_layout = self.panel("Package Sources")
+        sources, sources_layout = self.panel("◎   PACKAGE SOURCES")
         sources.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         sources_layout.addWidget(self.sources_status)
         layout.addWidget(sources)
@@ -1731,7 +2385,11 @@ class SoftwarePage(QWidget):
 
     def history_page(self):
         page = QWidget()
+        page.setObjectName("softwareSubPage")
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(10)
+        layout.addWidget(self.software_section_header("SOFTWARE HISTORY", "TRANSACTIONS  •  SNAPSHOTS  •  AUDIT", "◷"))
         layout.addWidget(self.history_list)
         return page
 
@@ -1749,6 +2407,8 @@ class SoftwarePage(QWidget):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         SOFTWARE_HISTORY_FILE.write_text(json.dumps(self.software_history, indent=2), encoding="utf-8")
         self.render_history()
+        if hasattr(self, "software_activity_layout"):
+            self.render_software_activity()
 
     def render_history(self):
         self.history_list.clear()
@@ -1765,8 +2425,29 @@ class SoftwarePage(QWidget):
         layout.addWidget(heading)
         return frame, layout
 
+    def software_section_header(self, title, subtitle, icon):
+        frame = QFrame()
+        frame.setObjectName("softwareSectionHeader")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(16, 10, 16, 10)
+        mark = QLabel(icon)
+        mark.setObjectName("softwareSectionIcon")
+        mark.setAlignment(Qt.AlignCenter)
+        mark.setFixedSize(38, 38)
+        copy = QVBoxLayout()
+        copy.setSpacing(2)
+        heading = QLabel(title)
+        heading.setObjectName("softwareSectionTitle")
+        detail = QLabel(subtitle)
+        detail.setObjectName("softwareSectionSubtitle")
+        copy.addWidget(heading)
+        copy.addWidget(detail)
+        row.addWidget(mark)
+        row.addLayout(copy, 1)
+        return frame
+
     def update_panel(self):
-        frame, layout = self.panel("System Updates")
+        frame, layout = self.panel("↻   UPDATE COMMANDS")
         body = QLabel("Update official repositories and AUR packages from a terminal session.")
         body.setWordWrap(True)
         body.setObjectName("muted")
@@ -1775,10 +2456,13 @@ class SoftwarePage(QWidget):
 
         row = QHBoxLayout()
         update = QPushButton("Update System")
+        update.setObjectName("softwarePrimaryAction")
         update.clicked.connect(self.update_system)
         check = QPushButton("Check Updates")
+        check.setObjectName("softwareSectionButton")
         check.clicked.connect(self.refresh)
         flatpak = QPushButton("Update Flatpaks")
+        flatpak.setObjectName("softwareSectionButton")
         flatpak.clicked.connect(self.update_flatpaks)
         row.addWidget(update)
         row.addWidget(check)
@@ -1788,10 +2472,13 @@ class SoftwarePage(QWidget):
         return frame
 
     def package_panel(self):
-        frame, layout = self.panel("Packages")
+        frame, layout = self.panel("▣   PACKAGE CATALOGUE")
+        frame.setObjectName("softwareSubPageCard")
+        layout.setSpacing(10)
+        layout.addWidget(self.software_section_header("PACKAGES", "CURATED APPS  •  REPOSITORIES  •  EXPORT", "▣"))
         layout.addWidget(self.tools_status)
 
-        curated, curated_layout = self.panel("CommandOS Curated Packages")
+        curated, curated_layout = self.panel("◇   COMMAND CURATED APPS")
         curated_body = QLabel(
             "Browse the CommandOS Popular Applications catalogue by category, including browsers, "
             "development, graphics, multimedia, office, gaming, and virtualization packages."
@@ -1809,7 +2496,7 @@ class SoftwarePage(QWidget):
         self.load_package_metadata()
         self.load_cachyos_catalog()
 
-        search_heading = QLabel("REPOSITORY PACKAGE SEARCH")
+        search_heading = QLabel("⌕   REPOSITORY PACKAGE SEARCH")
         search_heading.setObjectName("panelTitle")
         layout.addWidget(search_heading)
         layout.addWidget(self.package_search)
@@ -1824,6 +2511,7 @@ class SoftwarePage(QWidget):
             ("Export Package List", self.export_package_list),
         ]:
             button = QPushButton(label)
+            button.setObjectName("softwareSectionButton")
             button.clicked.connect(handler)
             row.addWidget(button)
         row.addStretch()
@@ -1832,9 +2520,12 @@ class SoftwarePage(QWidget):
 
     def kernel_panel(self):
         page = QWidget()
+        page.setObjectName("softwareSubPage")
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(4, 8, 4, 4)
-        frame, layout = self.panel("Kernel Manager")
+        page_layout.setSpacing(10)
+        page_layout.addWidget(self.software_section_header("KERNELS", "INSTALL  •  VERIFY  •  BOOT", "◉"))
+        frame, layout = self.panel("◉   KERNEL MANAGER")
         frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         body = QLabel("Manage installed kernels through chwd-kernel. Install/remove actions open in a terminal and require confirmation.")
         body.setWordWrap(True)
@@ -1863,6 +2554,7 @@ class SoftwarePage(QWidget):
             ("Update GRUB", self.update_grub),
         ]:
             button = QPushButton(label)
+            button.setObjectName("softwareSectionButton")
             button.clicked.connect(handler)
             row.addWidget(button)
         row.addStretch()
@@ -1871,8 +2563,60 @@ class SoftwarePage(QWidget):
         page_layout.addStretch(1)
         return page
 
+    def package_cleanup_page(self):
+        page = QWidget()
+        page.setObjectName("softwareSubPage")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 8, 4, 4)
+        page_layout.setSpacing(10)
+        page_layout.addWidget(self.software_section_header("ORPHANS & FOREIGN", "CLASSIFY  •  INSPECT  •  CLEAN", "△"))
+        grid = QGridLayout()
+
+        orphans, orphan_layout = self.panel("△   ORPHAN PACKAGES")
+        orphan_help = QLabel("Dependencies that are no longer required by another installed package. Review them before removal; packages you still use can be marked as explicitly installed.")
+        orphan_help.setObjectName("muted")
+        orphan_help.setWordWrap(True)
+        orphan_layout.addWidget(orphan_help)
+        orphan_layout.addWidget(self.orphan_summary)
+        orphan_layout.addWidget(self.orphan_list, 1)
+        orphan_actions = QHBoxLayout()
+        for label, handler in [
+            ("Inspect", lambda: self.inspect_managed_packages(self.orphan_list)),
+            ("Keep Selected", self.keep_selected_orphans),
+            ("Remove Selected", self.remove_selected_orphans),
+            ("Remove All", self.remove_all_orphans),
+        ]:
+            button = QPushButton(label); button.setObjectName("softwareSectionButton"); button.clicked.connect(handler); orphan_actions.addWidget(button)
+        orphan_actions.addStretch(); orphan_layout.addLayout(orphan_actions)
+
+        foreign, foreign_layout = self.panel("◎   FOREIGN PACKAGES")
+        foreign_help = QLabel("Packages installed locally or from the AUR that are absent from configured repository databases. Foreign does not mean unsafe; inspect the source and decide whether to update, keep, or remove each package.")
+        foreign_help.setObjectName("muted")
+        foreign_help.setWordWrap(True)
+        foreign_layout.addWidget(foreign_help)
+        foreign_layout.addWidget(self.foreign_summary)
+        foreign_layout.addWidget(self.foreign_list, 1)
+        foreign_actions = QHBoxLayout()
+        for label, handler in [
+            ("Inspect", lambda: self.inspect_managed_packages(self.foreign_list)),
+            ("Update / Rebuild", self.update_selected_foreign),
+            ("Remove Selected", self.remove_selected_foreign),
+        ]:
+            button = QPushButton(label); button.setObjectName("softwareSectionButton"); button.clicked.connect(handler); foreign_actions.addWidget(button)
+        foreign_actions.addStretch(); foreign_layout.addLayout(foreign_actions)
+
+        grid.addWidget(orphans, 0, 0)
+        grid.addWidget(foreign, 0, 1)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
+        page_layout.addLayout(grid, 1)
+        refresh = QPushButton("Refresh Package Classification")
+        refresh.setObjectName("softwareSectionButton")
+        refresh.clicked.connect(self.refresh)
+        page_layout.addWidget(refresh, 0, Qt.AlignLeft)
+        return page
+
     def maintenance_panel(self):
-        frame, layout = self.panel("Maintenance")
+        frame, layout = self.panel("⚙   MAINTENANCE")
         body = QLabel("Prepare repair and cleanup actions in a terminal so privilege prompts and package confirmations stay visible.")
         body.setWordWrap(True)
         body.setObjectName("muted")
@@ -1886,6 +2630,7 @@ class SoftwarePage(QWidget):
             ("List Orphans", "pacman -Qtdq || true"),
         ]:
             button = QPushButton(label)
+            button.setObjectName("softwareSectionButton")
             button.clicked.connect(lambda checked=False, l=label, c=command: self.run_maintenance(l, c))
             row.addWidget(button)
         row.addStretch()
@@ -1895,6 +2640,10 @@ class SoftwarePage(QWidget):
     def refresh(self):
         if self.software_future is None:
             self.health_header.setText("SOFTWARE STATE  ·  CHECKING…")
+            for card in getattr(self, "software_metrics", {}).values():
+                card.detail.setText("Checking packages…")
+            if hasattr(self, "software_health_checklist"):
+                self.software_health_checklist.setText("Calculating software health…")
             self.software_future = self.software_executor.submit(self.collect_software_state)
 
     def collect_software_state(self):
@@ -1941,24 +2690,180 @@ class SoftwarePage(QWidget):
             state = future.result()
         except Exception as error:
             self.health_header.setText(f"SOFTWARE STATE  ·  CHECK FAILED: {error}")
+            self.health_header.setProperty("state", "critical")
+            self.health_header.style().unpolish(self.health_header); self.health_header.style().polish(self.health_header)
+            for card in getattr(self, "software_metrics", {}).values():
+                card.set_state("—", "Unable to query package database", "critical")
+            if hasattr(self, "software_health_checklist"):
+                self.software_health_checklist.setText("✗  Health check failed\nℹ  Review package sources and retry")
             return
         self.render_software_state(state)
 
     def render_software_state(self, state):
+        self.last_software_state = state
         self.update_records = self.parse_update_records(state["repo"], "OFFICIAL") + self.parse_update_records(state["aur"], "AUR")
         total = len(self.update_records)
         high = sum(record["impact"] == "HIGH" for record in self.update_records)
         medium = sum(record["impact"] == "MEDIUM" for record in self.update_records)
         low = total - high - medium
-        attention = total or state["orphans"] or state["lock"] != "CLEAR"
-        self.health_header.setText(f"SYSTEM  {'ATTENTION' if attention else 'HEALTHY'}  ·  UPDATES  {total}  ·  AUR  {len(state['aur'])}  ·  FLATPAK  {len(state['flatpak'])}  ·  ORPHANS  {len(state['orphans'])}  ·  REBOOT  {'YES' if state['reboot'] else 'NO'}")
+        critical = state["reboot"] or state["lock"] != "CLEAR" or high
+        attention = total or state["orphans"] or not state["snapshot"]["configured"]
+        if critical:
+            headline = "ACTION REQUIRED"
+            reason = "REBOOT OR HIGH-IMPACT SOFTWARE STATE REQUIRES REVIEW"
+        elif state["orphans"]:
+            headline = "SYSTEM ATTENTION"
+            reason = f"{len(state['orphans'])} ORPHAN PACKAGE{'S' if len(state['orphans']) != 1 else ''} REQUIRE REVIEW"
+        elif total:
+            headline = "SYSTEM ATTENTION"
+            reason = f"{total} SOFTWARE UPDATE{'S' if total != 1 else ''} AVAILABLE"
+        elif not state["snapshot"]["configured"]:
+            headline = "SYSTEM ATTENTION"
+            reason = "SNAPSHOT PROTECTION IS NOT CONFIGURED"
+        else:
+            headline = "SYSTEM HEALTHY"
+            reason = "PACKAGE STATE IS CURRENT AND PROTECTED"
+        self.health_header.setText(f"●  {headline}   ·   {reason}")
+        self.health_header.setProperty("state", "critical" if critical else "warning" if attention else "success")
+        self.health_header.style().unpolish(self.health_header); self.health_header.style().polish(self.health_header)
+        chip_values = {
+            "updates": (total, "warning" if total else "success"),
+            "aur": (len(state["aur"]), "warning" if state["aur"] else "success"),
+            "flatpak": (len(state["flatpak"]), "warning" if state["flatpak"] else "success"),
+            "orphans": (len(state["orphans"]), "warning" if state["orphans"] else "success"),
+            "reboot": ("YES" if state["reboot"] else "NO", "critical" if state["reboot"] else "success"),
+        }
+        labels = {"updates": "↻ UPDATES", "aur": "◇ AUR", "flatpak": "▣ FLATPAK", "orphans": "⚠ ORPHANS", "reboot": "⏻ REBOOT"}
+        for key, (value, status_state) in chip_values.items():
+            chip = self.software_chips[key]
+            chip.setText(f"{labels[key]}\n{value}")
+            chip.setProperty("state", status_state)
+            chip.style().unpolish(chip); chip.style().polish(chip)
+
+        metric_values = {
+            "updates": (total, "Available" if total else "System current", "warning" if total else "success"),
+            "aur": (len(state["aur"]), "Updates available" if state["aur"] else "Up to date", "warning" if state["aur"] else "success"),
+            "flatpak": (len(state["flatpak"]), "Updates available" if state["flatpak"] else "Up to date", "warning" if state["flatpak"] else "success"),
+            "orphans": (len(state["orphans"]), "Orphaned packages", "warning" if state["orphans"] else "success"),
+            "foreign": (len(state["foreign"]), "Installed", "info"),
+            "reboot": ("YES" if state["reboot"] else "NO", "Restart pending" if state["reboot"] else "System stable", "critical" if state["reboot"] else "success"),
+        }
+        for key, values in metric_values.items():
+            self.software_metrics[key].set_state(*values)
+
+        score = self.software_health_score(state, high)
+        previous_score = getattr(self, "previous_software_health_score", None)
+        self.software_health_gauge.set_score(score)
+        if previous_score is None:
+            trend_text = f"● Live · checked {time.strftime('%H:%M')}"
+        elif score > previous_score:
+            trend_text = f"▲ Up {score - previous_score}% since last check"
+        elif score < previous_score:
+            trend_text = f"▼ Down {previous_score - score}% since last check"
+        else:
+            trend_text = "— Stable since last check"
+        self.software_health_trend.setText(trend_text)
+        self.software_health_trend.setProperty("direction", "up" if previous_score is not None and score > previous_score else "down" if previous_score is not None and score < previous_score else "stable")
+        self.software_health_trend.style().unpolish(self.software_health_trend); self.software_health_trend.style().polish(self.software_health_trend)
+        self.previous_software_health_score = score
+        checklist = [
+            ("Updates", "ATTENTION" if total else "GOOD", bool(total)),
+            ("Orphan Packages", "WARNING" if state["orphans"] else "GOOD", bool(state["orphans"])),
+            ("Configuration", "ATTENTION" if state["lock"] != "CLEAR" else "GOOD", state["lock"] != "CLEAR"),
+            ("Snapshots", "NEEDS ATTENTION" if not state["snapshot"]["configured"] else "GOOD", not state["snapshot"]["configured"]),
+            ("Kernel", "GOOD" if state["kernel"] else "ATTENTION", not bool(state["kernel"])),
+            ("Security", "ATTENTION" if high else "GOOD", bool(high)),
+        ]
+        checklist_rows = []
+        for name, value, problem in checklist:
+            icon, icon_color = ("⚠", "#F5B83D") if problem else ("✓", "#35D66B")
+            value_color = "#F5B83D" if problem else "#D8E3EA"
+            checklist_rows.append(
+                f"<tr><td style='color:{icon_color};padding-right:8px'>{icon}</td>"
+                f"<td style='color:#D5E0E7;padding-right:24px'>{name}</td>"
+                f"<td align='right' style='color:{value_color};font-weight:700'>{value}</td></tr>"
+            )
+        self.software_health_checklist.setText(
+            "<table cellspacing='2' cellpadding='0'>" + "".join(checklist_rows) + "</table>"
+        )
+
+        estimate = max(2, round(total * 0.25)) if total else 0
+        recommendation_body, recommendation_detail, recommendation_badge, recommendation_button = self.software_intelligence["recommendation"]
+        recommendation_body.setText(f"{total} Update{'s' if total != 1 else ''} Available" if total else "System Is Up to Date")
+        recommendation_detail.setText(
+            f"Estimated time  ·  {estimate} minute{'s' if estimate != 1 else ''}\nReboot  ·  {'May be required' if high or state['reboot'] else 'Not required'}"
+            if total else "No update action is required."
+        )
+        recommendation_badge.setText("RECOMMENDED" if total else "SAFE")
+        recommendation_badge.setProperty("state", "warning" if total else "success")
+        recommendation_button.setEnabled(bool(total))
+        analysis_body, analysis_detail, analysis_badge, analysis_button = self.software_intelligence["analysis"]
+        analysis_body.setText(f"Low {low}  ·  Medium {medium}  ·  High {high}")
+        analysis_detail.setText("No risky updates detected." if not high else f"{high} high-impact update{'s' if high != 1 else ''} require review.")
+        analysis_badge.setText("REVIEW" if high else "SAFE")
+        analysis_badge.setProperty("state", "critical" if high else "success")
+        analysis_button.setEnabled(bool(total))
+        action_body, action_detail, action_badge, action_button = self.software_intelligence["action"]
+        if not state["snapshot"]["configured"]:
+            next_action, action_detail_text, action_label = "Configure snapshot protection", "Before the next system update.", "CONFIGURE SNAPSHOTS"
+        elif high:
+            next_action, action_detail_text, action_label = "Create a recovery snapshot", "Recommended before high-impact updates.", "CREATE SNAPSHOT"
+        elif state["orphans"] and not total:
+            next_action, action_detail_text, action_label = "Review orphan packages", "Remove packages that are no longer required.", "REVIEW ORPHANS"
+        elif total:
+            next_action, action_detail_text, action_label = "Review update impact", "Proceed when the package transaction is ready.", "REVIEW UPDATES"
+        else:
+            next_action, action_detail_text, action_label = "No action required", "Software health is good.", "SYSTEM HEALTHY"
+        action_body.setText(next_action); action_detail.setText(action_detail_text)
+        action_badge.setText("ACTION REQUIRED" if action_label not in ("SYSTEM HEALTHY", "REVIEW UPDATES") else "SAFE" if action_label == "SYSTEM HEALTHY" else "RECOMMENDED")
+        action_badge.setProperty("state", "warning" if action_label != "SYSTEM HEALTHY" else "success")
+        action_button.setText(action_label); action_button.setEnabled(bool(total or state["orphans"] or not state["snapshot"]["configured"]))
+        for _, _, badge, _ in self.software_intelligence.values():
+            badge.style().unpolish(badge); badge.style().polish(badge)
+
+        impact_counts = {"low": low, "medium": medium, "high": high}
+        for key, count in impact_counts.items():
+            value, bar, status = self.impact_columns[key]
+            percentage = round(count / max(1, total) * 100)
+            value.setText(str(count)); bar.setValue(percentage); status.setText(f"{percentage}% OF UPDATES" if total else "NO UPDATES DETECTED")
+
+        snapshot = state["snapshot"]
+        configured = snapshot["configured"]
+        self.software_protection.setText(
+            f"{'✓' if snapshot['backend'] != 'None detected' else '✗'}  BACKEND              {snapshot['backend']}\n"
+            f"{'✓' if configured else '⚠'}  CONFIGURATION        {'READY' if configured else 'NOT READY'}\n"
+            f"{'✓' if configured else '⚠'}  ROLLBACK TEST        {'AVAILABLE' if configured else 'NOT CONFIRMED'}\n"
+            f"ℹ  RECOMMENDED          {'CREATE SNAPSHOT BEFORE UPDATING' if total else 'OPTIONAL'}"
+        )
+        self.snapshot_overview_button.setText("CREATE SNAPSHOT" if configured else "CONFIGURE SNAPSHOTS")
+        self.protection_explanation.setText(
+            "Snapshot protection is ready.\nCreate a recovery point before major updates."
+            if configured else "Snapshot protection is incomplete.\nConfigure Snapper before the next system update to enable reliable rollback."
+        )
+        self.render_software_activity()
         self.status.setText(f"{total} system updates ({len(state['repo'])} official, {len(state['aur'])} AUR) · {len(state['flatpak'])} Flatpak")
         self.overview_status.setText(f"UPDATES          {total}\nAUR              {len(state['aur'])}\nFLATPAK          {len(state['flatpak'])}\nORPHANS          {len(state['orphans'])}\nFOREIGN          {len(state['foreign'])}\nREBOOT REQUIRED  {'YES' if state['reboot'] else 'NO'}")
         self.impact_status.setText(f"LOW IMPACT  {low}  ·  MEDIUM IMPACT  {medium}  ·  HIGH IMPACT  {high}\nHigh impact indicates core system, kernel, driver, boot, or filesystem packages; it is not a prediction of failure.")
         snapshot = state["snapshot"]
         self.snapshot_status.setText(f"BACKEND  {snapshot['backend']}\nCONFIGURATION  {'READY' if snapshot['configured'] else 'NOT READY'}\nROLLBACK  {'POTENTIALLY AVAILABLE' if snapshot['configured'] else 'NOT CONFIRMED'}\nRECOMMENDATION  {'CREATE SNAPSHOT BEFORE HIGH-IMPACT UPDATE' if high else 'OPTIONAL'}")
         self.health_status.setText(f"PACKAGE DATABASE     {'LOCKED' if state['lock'] != 'CLEAR' else 'ACCESSIBLE'}\nPACMAN LOCK          {state['lock']}\nPACKAGE CACHE        {state['cache']}\nORPHANS              {len(state['orphans'])}\nFOREIGN PACKAGES     {len(state['foreign'])}\nRUNNING KERNEL       {state['kernel']}")
-        self.sources_status.setText(f"PACMAN       {'AVAILABLE' if command_exists('pacman') else 'MISSING'}\nAUR HELPER   {('YAY' if command_exists('yay') else 'PARU' if command_exists('paru') else 'NONE')}\nFLATPAK      {'AVAILABLE' if command_exists('flatpak') else 'MISSING'}\nSNAPSHOTS    {snapshot['backend']} · {'READY' if snapshot['configured'] else 'NOT CONFIGURED'}")
+        commandos_repo = "ENABLED" if re.search(r"(?m)^\[commandos\]\s*$", safe_read_text("/etc/pacman.conf")) else "NOT CONFIGURED"
+        self.sources_status.setText(f"PACMAN       {'AVAILABLE' if command_exists('pacman') else 'MISSING'}\nCOMMANDOS    {commandos_repo}\nAUR HELPER   {('YAY' if command_exists('yay') else 'PARU' if command_exists('paru') else 'NONE')}\nFLATPAK      {'AVAILABLE' if command_exists('flatpak') else 'MISSING'}\nSNAPSHOTS    {snapshot['backend']} · {'READY' if snapshot['configured'] else 'NOT CONFIGURED'}")
+        self.orphan_packages = list(state["orphans"])
+        self.foreign_packages = list(state["foreign"])
+        self.orphan_list.clear()
+        self.orphan_list.addItems(self.orphan_packages)
+        self.foreign_list.clear()
+        self.foreign_list.addItems(self.foreign_packages)
+        self.orphan_summary.setText(
+            f"{len(self.orphan_packages)} orphan package(s) detected."
+            if self.orphan_packages else "No orphan packages detected."
+        )
+        aur_helper = "yay" if command_exists("yay") else "paru" if command_exists("paru") else "no AUR helper"
+        self.foreign_summary.setText(
+            f"{len(self.foreign_packages)} foreign package(s) detected · {aur_helper}."
+            if self.foreign_packages else "No foreign packages detected."
+        )
         self.update_list.clear()
         for record in sorted(self.update_records, key=lambda item: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[item["impact"]]):
             self.update_list.addItem(f"{record['name'].upper()}  ·  {record['impact']} IMPACT  ·  {record['source']}\n{record['current']} → {record['new']}\n{record['reason']}")
@@ -1969,7 +2874,7 @@ class SoftwarePage(QWidget):
         self.refresh_tools_status()
 
     def parse_update_records(self, rows, source):
-        high_names = {"linux", "linux-cachyos", "nvidia", "nvidia-utils", "mesa", "systemd", "glibc", "grub", "mkinitcpio", "btrfs-progs", "pacman", "linux-firmware"}
+        high_names = {"linux", "linux-commandos", "linux-commandos-lts", "nvidia", "nvidia-utils", "mesa", "systemd", "glibc", "grub", "mkinitcpio", "btrfs-progs", "pacman", "linux-firmware"}
         medium_prefixes = ("qt6-", "plasma-", "pipewire", "openssl", "python", "gcc")
         records = []
         for row in rows:
@@ -1986,11 +2891,111 @@ class SoftwarePage(QWidget):
             records.append({"name": name, "current": current, "new": new, "source": source, "impact": impact, "reason": reason})
         return records
 
-    def show_update_review(self):
-        if not self.update_records:
-            self.result.setPlainText("No system updates are currently available, or the state check has not completed.")
+    def selected_managed_packages(self, widget):
+        packages = []
+        for item in widget.selectedItems():
+            try:
+                packages.append(validate_package(item.text().strip()))
+            except ActionValidationError:
+                continue
+        return packages
+
+    def inspect_managed_packages(self, widget):
+        packages = self.selected_managed_packages(widget)
+        if not packages:
+            self.result.setPlainText("Select one or more packages to inspect.")
             return
-        self.result.setPlainText("\n\n".join(f"{item['name']}  {item['current']} → {item['new']}\n{item['impact']} IMPACT · {item['source']}\n{item['reason']}" for item in self.update_records))
+        sections = []
+        for package in packages[:25]:
+            output, error, code = run_text(["pacman", "-Qi", package], 6)
+            sections.append(output.strip() if code == 0 else f"{package}\n{error or 'Package information unavailable.'}")
+        self.result.setPlainText("\n\n".join(sections))
+
+    def remove_managed_packages(self, packages, category):
+        if not packages:
+            self.result.setPlainText(f"Select one or more {category.lower()} packages first.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        command = f"sudo pacman -Rns {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        warning = "Pacman will calculate and show the complete removal transaction in the terminal before confirmation."
+        if not confirm(self, f"Remove {category} Packages", f"Remove these packages?\n\n{review}\n\n{warning}\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command(f"Remove {category} Packages", command):
+            self.record_transaction(f"Remove {category.lower()} packages", command)
+            self.parent_window.add_history(f"{category} package removal started: {len(packages)} package(s)", category="UPDATE")
+
+    def remove_selected_orphans(self):
+        self.remove_managed_packages(self.selected_managed_packages(self.orphan_list), "Orphan")
+
+    def remove_all_orphans(self):
+        packages = []
+        for package in self.orphan_packages:
+            try:
+                packages.append(validate_package(package))
+            except ActionValidationError:
+                continue
+        self.remove_managed_packages(packages, "All Orphan")
+
+    def keep_selected_orphans(self):
+        packages = self.selected_managed_packages(self.orphan_list)
+        if not packages:
+            self.result.setPlainText("Select orphan packages to keep as explicitly installed.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        command = f"sudo pacman -D --asexplicit {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        if not confirm(self, "Keep Orphan Packages", f"Mark these packages as explicitly installed so they are no longer classified as orphans?\n\n{review}\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command("Keep Orphan Packages", command):
+            self.record_transaction("Mark orphan packages explicit", command)
+            self.parent_window.add_history(f"Marked {len(packages)} orphan package(s) as explicit", category="UPDATE")
+
+    def remove_selected_foreign(self):
+        self.remove_managed_packages(self.selected_managed_packages(self.foreign_list), "Foreign")
+
+    def update_selected_foreign(self):
+        packages = self.selected_managed_packages(self.foreign_list)
+        if not packages:
+            self.result.setPlainText("Select foreign packages to update or rebuild.")
+            return
+        helper = "yay" if command_exists("yay") else "paru" if command_exists("paru") else ""
+        if not helper:
+            self.result.setPlainText("No AUR helper is available. Foreign packages can still be inspected or removed; locally built packages must be rebuilt from their original source.")
+            return
+        quoted = " ".join(shlex.quote(package) for package in packages)
+        command = f"{helper} -S --needed {quoted}"
+        review = "\n".join(f"• {package}" for package in packages)
+        if not confirm(self, "Update Foreign Packages", f"Ask {helper} to update or rebuild these packages?\n\n{review}\n\nPackages unavailable from the AUR will be reported without being changed.\n\nCommand:\n{command}"):
+            return
+        if self.terminal_command("Update Foreign Packages", command):
+            self.record_transaction("Update selected foreign packages", command)
+            self.parent_window.add_history(f"Foreign package update started: {len(packages)} package(s)", category="UPDATE")
+
+    def show_update_review(self):
+        self.tabs.setCurrentIndex(1)
+        self.result.show()
+        if not self.update_records:
+            if self.software_future is not None:
+                self.result.setPlainText("Checking package sources… The update review will populate when the current scan completes.")
+            else:
+                self.result.setPlainText("No system updates are currently available. The Updates workspace is open and ready for a new check.")
+            return
+        self.update_list.clear()
+        for item in sorted(self.update_records, key=lambda record: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(record["impact"], 3)):
+            self.update_list.addItem(
+                f"{item['name'].upper()}  ·  {item['impact']} IMPACT  ·  {item['source']}\n"
+                f"{item['current']} → {item['new']}\n{item['reason']}"
+            )
+        self.update_list.scrollToTop()
+        high = sum(item["impact"] == "HIGH" for item in self.update_records)
+        medium = sum(item["impact"] == "MEDIUM" for item in self.update_records)
+        low = len(self.update_records) - high - medium
+        self.result.setPlainText(
+            f"UPDATE REVIEW READY  ·  {len(self.update_records)} package(s)\n"
+            f"LOW {low}  ·  MEDIUM {medium}  ·  HIGH {high}\n"
+            "Review package impact below before starting the full system upgrade."
+        )
 
     def refresh_tools_status(self):
         tools = []
@@ -2172,12 +3177,7 @@ class SoftwarePage(QWidget):
             )
             item.setData(Qt.UserRole, record["name"])
             self.package_list.addItem(item)
-        if records:
-            self.result.setPlainText(
-                f"Showing {len(records)} of {len(self.repository_packages)} configured repository packages. "
-                "Type in the filter to narrow the catalogue; double-click a package to install it."
-            )
-        elif not self.repository_packages:
+        if not records and not self.repository_packages:
             self.result.setPlainText("Repository package metadata is unavailable. Use Search to query pacman directly.")
 
     def clean_ansi(self, text):
@@ -2284,13 +3284,6 @@ class SoftwarePage(QWidget):
         if self.terminal_command("Update GRUB", command):
             self.record_transaction("Regenerate GRUB configuration", command)
             self.parent_window.add_history("GRUB update started")
-
-    def install_kernel_gui(self):
-        command = self.package_install_command("cachyos-kernel-manager")
-        if not confirm(self, "Install CachyOS Kernel Manager", f"Install the CachyOS Kernel Manager GUI?\n\nCommand:\n{command}"):
-            return
-        if self.terminal_command("Install CachyOS Kernel Manager", command):
-            self.parent_window.add_history("CachyOS Kernel Manager install started")
 
     def update_command(self):
         if command_exists("yay"):
@@ -2485,6 +3478,66 @@ class SoftwarePage(QWidget):
         self.software_executor.shutdown(wait=False, cancel_futures=True)
 
 
+class ToolItemDelegate(QStyledItemDelegate):
+    """Paint Tool Library entries as compact application cards."""
+
+    def paint(self, painter, option, index):
+        tool = index.data(Qt.UserRole) or {}
+        if not isinstance(tool, dict):
+            super().paint(painter, option, index)
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(option.rect).adjusted(3, 3, -3, -3)
+        selected = bool(option.state & QStyle.State_Selected)
+        painter.setPen(QPen(QColor("#2BC4FF" if selected else "#173B52"), 1))
+        painter.setBrush(QColor("#102B3D" if selected else "#08141E"))
+        painter.drawRoundedRect(rect, 8, 8)
+        if selected:
+            painter.setPen(Qt.NoPen); painter.setBrush(QColor("#2BC4FF"))
+            painter.drawRoundedRect(QRectF(rect.left(), rect.top(), 4, rect.height()), 2, 2)
+
+        icon = index.data(Qt.DecorationRole)
+        if isinstance(icon, QIcon):
+            icon.paint(painter, int(rect.left() + 12), int(rect.top() + 15), 40, 40)
+        left = rect.left() + 64
+        width = rect.width() - 76
+        title_font = painter.font(); title_font.setPixelSize(13); title_font.setWeight(QFont.Bold)
+        painter.setFont(title_font); painter.setPen(QColor("#F3F8FB"))
+        title = painter.fontMetrics().elidedText(str(tool.get("name", "Tool")), Qt.ElideRight, int(width))
+        if tool.get("id") in tool.get("_favorites", []):
+            title = "★  " + title
+        painter.drawText(QRectF(left, rect.top() + 8, width, 20), Qt.AlignVCenter, title.upper())
+        body_font = painter.font(); body_font.setPixelSize(11); body_font.setWeight(QFont.Normal)
+        painter.setFont(body_font); painter.setPen(QColor("#9FB1BD"))
+        description = painter.fontMetrics().elidedText(str(tool.get("description", "")), Qt.ElideRight, int(width))
+        painter.drawText(QRectF(left, rect.top() + 29, width, 18), Qt.AlignVCenter, description)
+
+        metadata = tool.get("metadata", {})
+        badges = [
+            ("INSTALLED" if tool.get("installed") else "AVAILABLE", "#35D66B" if tool.get("installed") else "#2BC4FF"),
+            (str(metadata.get("type", tool.get("kind", "tool"))).upper(), "#8FA9BB"),
+            (str(tool.get("group", "Tool")).upper(), "#A65DFF"),
+        ]
+        if metadata.get("recommended"):
+            badges.append(("COMMANDOS", "#B478FF"))
+        badge_x = left
+        badge_font = painter.font(); badge_font.setPixelSize(9); badge_font.setWeight(QFont.DemiBold); painter.setFont(badge_font)
+        for text_value, color in badges:
+            badge_width = min(int(width), painter.fontMetrics().horizontalAdvance(text_value) + 14)
+            if badge_x + badge_width > rect.right() - 8:
+                break
+            badge_rect = QRectF(badge_x, rect.top() + 52, badge_width, 20)
+            fill = QColor(color); fill.setAlpha(28)
+            painter.setBrush(fill); painter.setPen(QPen(QColor(color), 1)); painter.drawRoundedRect(badge_rect, 5, 5)
+            painter.setPen(QColor(color)); painter.drawText(badge_rect, Qt.AlignCenter, text_value)
+            badge_x += badge_width + 5
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(max(320, option.rect.width()), 82)
+
+
 class ToolLibraryPage(QWidget):
     def __init__(self, parent_window):
         super().__init__()
@@ -2508,9 +3561,14 @@ class ToolLibraryPage(QWidget):
         self.view_mode.addItem("INVENTORY", "inventory")
         self.view_mode.currentIndexChanged.connect(self.view_changed)
         self.categories = QListWidget()
-        self.categories.setFixedWidth(210)
+        self.categories.setObjectName("toolCategories")
+        self.categories.setMinimumWidth(210)
         self.categories.itemSelectionChanged.connect(self.render_tools)
         self.list = QListWidget()
+        self.list.setObjectName("toolAppList")
+        self.list.setItemDelegate(ToolItemDelegate(self.list))
+        self.list.setIconSize(QSize(40, 40))
+        self.list.setSpacing(2)
         self.list.itemSelectionChanged.connect(self.selection_changed)
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
@@ -2521,10 +3579,13 @@ class ToolLibraryPage(QWidget):
         self.status = QLabel("--")
         self.status.setObjectName("muted")
         self.favorite_button = QPushButton("☆ FAVORITE")
+        self.favorite_button.setObjectName("toolActionButton")
         self.favorite_button.clicked.connect(self.toggle_favorite)
+        self.filter_buttons = {}
+        self.installing_tool_key = ""
         self.auto_refresh = QTimer(self)
         self.auto_refresh.timeout.connect(self.refresh_if_changed)
-        self.auto_refresh.start(15000)
+        self.auto_refresh.start(5000)
         self.inventory_watcher = QFileSystemWatcher(self)
         watch_paths = [
             CURATED_TOOLS_FILE,
@@ -2533,6 +3594,8 @@ class ToolLibraryPage(QWidget):
             Path.home() / ".local/share/applications",
             Path("/var/lib/flatpak/exports/share/applications"),
             Path.home() / ".local/share/flatpak/exports/share/applications",
+            Path("/var/lib/flatpak/app"),
+            Path.home() / ".local/share/flatpak/app",
         ]
         watch_paths.extend(Path(path) for path in os.environ.get("PATH", "").split(os.pathsep) if path)
         self.inventory_watch_paths = list(dict.fromkeys(watch_paths))
@@ -2549,38 +3612,66 @@ class ToolLibraryPage(QWidget):
         title = QLabel("TOOL LIBRARY")
         title.setObjectName("healthHeader")
         layout.addWidget(title)
+        stats = QHBoxLayout(); stats.setSpacing(8)
+        self.tool_stats = {}
+        for key, label in (("installed", "INSTALLED"), ("available", "AVAILABLE"), ("recommended", "RECOMMENDED"), ("shown", "SHOWN")):
+            card = QFrame(); card.setObjectName("toolStatCard")
+            box = QVBoxLayout(card); box.setContentsMargins(10, 6, 10, 6); box.setSpacing(0)
+            value = QLabel("—"); value.setObjectName("toolStatValue")
+            caption = QLabel(label); caption.setObjectName("toolStatLabel")
+            box.addWidget(value); box.addWidget(caption); stats.addWidget(card, 1)
+            self.tool_stats[key] = value
+        layout.addLayout(stats)
         layout.addWidget(self.status)
 
         controls = QHBoxLayout()
         controls.addWidget(self.view_mode)
         controls.addWidget(self.search, 1)
-        refresh = QPushButton("Refresh Library")
+        refresh = QPushButton("Sync Now")
+        refresh.setToolTip("Auto-sync is active; use this to force an immediate full inventory scan")
         refresh.clicked.connect(self.refresh)
         controls.addWidget(refresh)
         layout.addLayout(controls)
 
+        filters = QHBoxLayout(); filters.setSpacing(6)
+        filter_label = QLabel("QUICK FILTERS"); filter_label.setObjectName("toolFilterLabel"); filters.addWidget(filter_label)
+        for key, label in (("installed", "Installed"), ("missing", "Available"), ("gui", "GUI"), ("cli", "CLI"), ("recommended", "Recommended")):
+            chip = QPushButton(label); chip.setObjectName("toolFilterChip"); chip.setCheckable(True)
+            chip.toggled.connect(self.render_tools); filters.addWidget(chip); self.filter_buttons[key] = chip
+        filters.addStretch(); layout.addLayout(filters)
+
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self.categories)
-        split.addWidget(self.list)
+        browser = QWidget(); browser_layout = QVBoxLayout(browser); browser_layout.setContentsMargins(0, 0, 0, 0); browser_layout.setSpacing(6)
+        self.recommended_strip = QLabel("RECOMMENDED FOR YOU  ·  Calculating recommendations…")
+        self.recommended_strip.setObjectName("toolRecommendedStrip")
+        self.recommended_strip.setWordWrap(True)
+        browser_layout.addWidget(self.recommended_strip); browser_layout.addWidget(self.list, 1)
+        split.addWidget(browser)
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.addWidget(self.detail, 1)
+        right_layout.addWidget(self.detail, 3)
         actions = QHBoxLayout()
         for label, handler in [
-            ("Launch", self.launch_selected_tool),
-            ("Open in Terminal", self.open_selected_terminal),
-            ("Install", self.install_selected_tool),
-            ("Guide", self.open_selected_guide),
+            ("▶  Launch", self.launch_selected_tool),
+            (">_  Terminal", self.open_selected_terminal),
+            ("↓  Install", self.install_selected_tool),
+            ("▤  Guide", self.open_selected_guide),
         ]:
             button = QPushButton(label)
+            button.setObjectName("toolActionButton")
+            button.setMinimumWidth(92)
             button.clicked.connect(handler)
             actions.addWidget(button)
         actions.addWidget(self.favorite_button)
         actions.addStretch()
         right_layout.addLayout(actions)
-        right_layout.addWidget(self.result)
+        self.install_progress = QProgressBar(); self.install_progress.setObjectName("toolInstallProgress"); self.install_progress.setRange(0, 0); self.install_progress.hide()
+        right_layout.addWidget(self.install_progress)
+        right_layout.addWidget(self.result, 2)
         split.addWidget(right)
-        split.setSizes([190, 390, 610])
+        split.setStretchFactor(0, 18); split.setStretchFactor(1, 42); split.setStretchFactor(2, 40)
+        split.setSizes([216, 504, 480])
         layout.addWidget(split, 1)
         self.populate_categories()
         self.render_tools()
@@ -2626,7 +3717,8 @@ class ToolLibraryPage(QWidget):
             return
         future = self.inventory_future
         self.inventory_future = None
-        previous_keys = {tool.get("key") for tool in self.tools}
+        previous_by_key = {tool.get("key"): tool for tool in self.tools}
+        previous_keys = set(previous_by_key)
         try:
             self.tools = future.result()
         except Exception as error:
@@ -2636,15 +3728,27 @@ class ToolLibraryPage(QWidget):
         self.populate_categories()
         self.render_tools()
         added = [tool for tool in self.tools if tool.get("key") not in previous_keys]
+        current_keys = {tool.get("key") for tool in self.tools}
+        removed = [tool for key, tool in previous_by_key.items() if key not in current_keys]
         if self.inventory_initialized and previous_keys and added:
             names = ", ".join(tool.get("name", "Unknown") for tool in added[:5])
             suffix = f" and {len(added) - 5} more" if len(added) > 5 else ""
             message = f"Tool Library detected {len(added)} new item(s): {names}{suffix}"
             self.result.setPlainText(message)
             self.parent_window.add_history(message, category="SYSTEM")
+        elif self.inventory_initialized and previous_keys and removed:
+            names = ", ".join(tool.get("name", "Unknown") for tool in removed[:5])
+            suffix = f" and {len(removed) - 5} more" if len(removed) > 5 else ""
+            message = f"Tool Library removed {len(removed)} unavailable item(s): {names}{suffix}"
+            self.result.setPlainText(message)
+            self.parent_window.add_history(message, category="SYSTEM")
         else:
-            self.result.setPlainText("Tool Library synchronized with the live system inventory.")
+            self.result.setPlainText("Tool Library synchronized with the live system inventory. Automatic sync is active.")
         self.inventory_initialized = True
+        # The lower-right panel is contextual tool information; restore it after
+        # transient synchronization notices have been recorded.
+        if self.selected_tool():
+            self.selection_changed()
         if self.inventory_refresh_pending:
             self.inventory_refresh_pending = False
             if self.inventory_change_signature() != self.inventory_signature:
@@ -2777,6 +3881,7 @@ class ToolLibraryPage(QWidget):
                     "name": desktop.get("name") or key_name,
                     "package": executable or desktop.get("desktop_id") or key_name,
                     "desktop_id": desktop.get("desktop_id", ""),
+                    "icon_name": desktop.get("icon_name", ""),
                     "command": command,
                     "kind": "desktop",
                     "group": "Desktop App",
@@ -2858,6 +3963,7 @@ class ToolLibraryPage(QWidget):
         name = ""
         exec_line = ""
         comment = ""
+        icon_name = ""
         no_display = False
         try:
             for raw in file_path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -2870,6 +3976,8 @@ class ToolLibraryPage(QWidget):
                     exec_line = line.split("=", 1)[1].strip()
                 elif line.startswith("Comment=") and not comment:
                     comment = line.split("=", 1)[1].strip()
+                elif line.startswith("Icon=") and not icon_name:
+                    icon_name = line.split("=", 1)[1].strip()
                 elif line.startswith("NoDisplay="):
                     no_display = line.split("=", 1)[1].strip().lower() == "true"
         except OSError:
@@ -2877,7 +3985,7 @@ class ToolLibraryPage(QWidget):
         if not name or not exec_line or no_display:
             return None
         command = re.sub(r"\s+%[fFuUdDnNickvm]", "", exec_line).strip()
-        return {"desktop_id": file_path.name, "name": name, "command": command, "description": comment}
+        return {"desktop_id": file_path.name, "name": name, "command": command, "description": comment, "icon_name": icon_name}
 
     def view_changed(self):
         self.populate_categories()
@@ -2890,12 +3998,20 @@ class ToolLibraryPage(QWidget):
         mode = self.view_mode.currentData() if hasattr(self, "view_mode") else "library"
         values = []
         if mode == "library":
-            values = [("ALL CURATED TOOLS", "all"), ("★  FAVORITES", "favorites"), ("◷  RECENT", "recent"), ("COMMANDOS RECOMMENDED", "recommended")]
+            values = [("▦  ALL TOOLS\nBrowse the equipment locker", "all"), ("★  PINNED\nFavourite tools", "favorites"), ("◷  RECENT\nRecently launched", "recent"), ("✦  RECOMMENDED\nCommandOS selections", "recommended")]
             counts = {}
+            installed_counts = {}
             for info in self.metadata.values():
                 category = info.get("category", "Uncategorized")
                 counts[category] = counts.get(category, 0) + 1
-            values.extend((f"{category.upper()}  {count}", category) for category, count in sorted(counts.items()))
+            for tool in self.tools:
+                if tool.get("installed") and tool.get("id") in self.metadata:
+                    installed_counts[tool.get("group", "Uncategorized")] = installed_counts.get(tool.get("group", "Uncategorized"), 0) + 1
+            category_icons = {"3D Printing": "▣", "CAD & Creation": "✦", "Development": "⌘", "Networking": "◎", "Security": "◇", "Hardware": "⚙"}
+            values.extend(
+                (f"{category_icons.get(category, '◈')}  {category.upper()}\n{installed_counts.get(category, 0)} installed · {count} available", category)
+                for category, count in sorted(counts.items())
+            )
         elif mode == "collections":
             values = [("ALL COLLECTIONS", "all")]
         else:
@@ -2903,6 +4019,7 @@ class ToolLibraryPage(QWidget):
         for label, value in values:
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, value)
+            item.setSizeHint(QSize(190, 54))
             self.categories.addItem(item)
             if value == selected:
                 item.setSelected(True)
@@ -2943,12 +4060,29 @@ class ToolLibraryPage(QWidget):
                 self.list.item(0).setSelected(True)
             self.selection_changed()
             return
-        for tool in self.tools:
+        ordered_tools = sorted(
+            self.tools,
+            key=lambda tool: (tool.get("id") not in self.tool_state["favorites"], tool.get("group", ""), tool.get("name", "").lower()),
+        )
+        active_filters = {key for key, button in self.filter_buttons.items() if button.isChecked()}
+        for tool in ordered_tools:
             metadata = tool.get("metadata", {})
             haystack = " ".join([tool["name"], tool["package"], tool["command"], tool["group"], tool["description"],
                                  " ".join(metadata.get("capabilities", [])), " ".join(metadata.get("tasks", [])),
                                  " ".join(metadata.get("integrations", []))]).lower()
             if needle and needle not in haystack:
+                continue
+            tool_type = str(metadata.get("type", tool.get("kind", ""))).lower()
+            is_gui = tool_type in ("gui", "desktop", "graphical") or tool.get("kind") in ("desktop", "flatpak")
+            if "installed" in active_filters and not tool.get("installed"):
+                continue
+            if "missing" in active_filters and tool.get("installed"):
+                continue
+            if "gui" in active_filters and not is_gui:
+                continue
+            if "cli" in active_filters and is_gui:
+                continue
+            if "recommended" in active_filters and not metadata.get("recommended"):
                 continue
             if mode == "library":
                 if tool.get("id") not in self.metadata:
@@ -2963,17 +4097,56 @@ class ToolLibraryPage(QWidget):
                     continue
             elif category != "all" and tool["kind"] != category:
                 continue
-            self.filtered_tools.append(tool)
-            item = QListWidgetItem(self.item_label(tool))
-            item.setData(Qt.UserRole, tool)
+            rendered_tool = dict(tool)
+            rendered_tool["_favorites"] = list(self.tool_state["favorites"])
+            self.filtered_tools.append(rendered_tool)
+            item = QListWidgetItem()
+            item.setIcon(self.tool_icon(rendered_tool))
+            item.setSizeHint(QSize(360, 82))
+            item.setData(Qt.UserRole, rendered_tool)
             self.list.addItem(item)
             if selected_key and tool["key"] == selected_key:
                 item.setSelected(True)
         if not self.list.selectedItems() and self.list.count():
             self.list.item(0).setSelected(True)
         installed_curated = sum(tool.get("installed") and tool.get("id") in self.metadata for tool in self.tools)
-        self.status.setText(f"{len(self.metadata)} curated tools · {installed_curated} installed · {len(self.filtered_tools)} shown · {len(self.tools)} inventory entries")
+        available_curated = max(0, len(self.metadata) - installed_curated)
+        recommended = sum(bool(tool.get("metadata", {}).get("recommended")) for tool in self.tools if tool.get("id") in self.metadata)
+        self.tool_stats["installed"].setText(str(installed_curated))
+        self.tool_stats["available"].setText(str(available_curated))
+        self.tool_stats["recommended"].setText(str(recommended))
+        self.tool_stats["shown"].setText(str(len(self.filtered_tools)))
+        recommended_names = [tool["name"] for tool in self.tools if tool.get("metadata", {}).get("recommended") and not tool.get("installed")][:3]
+        if not recommended_names:
+            recommended_names = [tool["name"] for tool in self.tools if tool.get("metadata", {}).get("recommended")][:3]
+        self.recommended_strip.setText("✦  RECOMMENDED FOR YOU  ·  " + ("   •   ".join(recommended_names) if recommended_names else "Your equipment locker is ready"))
+        self.status.setText(
+            f"● AUTO-SYNC  ·  {len(self.metadata)} curated tools  ·  {installed_curated} installed  ·  "
+            f"{len(self.filtered_tools)} shown  ·  {len(self.tools)} live inventory entries"
+        )
         self.selection_changed()
+
+    def tool_icon(self, tool):
+        aliases = {
+            "code": "visual-studio-code", "visual-studio-code-bin": "visual-studio-code",
+            "docker": "docker", "git": "git", "blender": "blender", "freecad": "freecad",
+            "wireshark": "wireshark", "ollama": "ollama", "kicad": "kicad", "prusaslicer": "prusa-slicer",
+        }
+        command = str(tool.get("command", "")).split()[0] if tool.get("command") else ""
+        candidates = [tool.get("icon_name"), aliases.get(command), aliases.get(tool.get("package")), command,
+                      tool.get("package"), str(tool.get("desktop_id", "")).removesuffix(".desktop")]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if str(candidate).startswith("/") and Path(candidate).is_file():
+                icon = QIcon(str(candidate))
+            else:
+                icon = QIcon.fromTheme(str(candidate))
+            if not icon.isNull():
+                return icon
+        metadata_type = str(tool.get("metadata", {}).get("type", "")).lower()
+        fallback = QStyle.SP_ComputerIcon if metadata_type == "gui" or tool.get("kind") in ("desktop", "flatpak") else QStyle.SP_FileDialogDetailedView
+        return self.style().standardIcon(fallback)
 
     def item_label(self, tool):
         metadata = tool.get("metadata", {})
@@ -2994,12 +4167,20 @@ class ToolLibraryPage(QWidget):
         tool = self.selected_tool()
         if not tool:
             self.detail.setPlainText("Select a tool.")
+            self.result.setHtml("<h3>Tool Information</h3><p>Select an item to inspect its equipment status.</p>")
             self.favorite_button.setEnabled(False)
             return
-        self.detail.setPlainText(self.guide_text(tool))
+        self.detail.setHtml(self.guide_html(tool))
+        self.result.setHtml(self.tool_information_html(tool))
         self.favorite_button.setEnabled(tool.get("kind") != "collection" and tool.get("id") in self.metadata)
         favorite = tool.get("id") in self.tool_state["favorites"]
-        self.favorite_button.setText("★ FAVORITE" if favorite else "☆ FAVORITE")
+        self.favorite_button.setText("★  PINNED" if favorite else "☆  PIN TOOL")
+        if tool.get("installed"):
+            if self.installing_tool_key == tool.get("key"):
+                self.installing_tool_key = ""
+            self.install_progress.hide()
+        else:
+            self.install_progress.setVisible(self.installing_tool_key == tool.get("key"))
 
     def toggle_favorite(self):
         tool = self.selected_tool()
@@ -3011,7 +4192,7 @@ class ToolLibraryPage(QWidget):
         else:
             self.tool_state["favorites"].append(tool_id)
         self.save_tool_state()
-        self.selection_changed()
+        self.render_tools()
 
     def record_recent(self, tool):
         tool_id = tool.get("id")
@@ -3086,6 +4267,10 @@ class ToolLibraryPage(QWidget):
         )
         ok, terminal = launch_terminal(f"Install {tool['name']}", shell_command)
         self.result.setPlainText(f"Started install in {terminal}:\n{command}" if ok else terminal)
+        if ok:
+            self.installing_tool_key = tool.get("key", "")
+            self.install_progress.show()
+            self.result.setHtml(f"<h3>Installing {html.escape(tool['name'])}…</h3><p>Package installation is running in {html.escape(terminal)}.</p><p>The Tool Library will mark it Installed automatically when the transaction completes.</p>")
         self.parent_window.add_history(f"Tool install started: {tool['name']}")
 
     def review_collection_install(self, tool):
@@ -3132,12 +4317,58 @@ class ToolLibraryPage(QWidget):
         guide = QTextEdit()
         guide.setReadOnly(True)
         guide.setObjectName("textPanel")
-        guide.setPlainText(self.guide_text(tool))
+        guide.setHtml(self.guide_html(tool))
         layout.addWidget(guide)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.exec()
+
+    def guide_html(self, tool):
+        if tool.get("kind") == "collection":
+            return f"<pre>{html.escape(self.guide_text(tool))}</pre>"
+        metadata = tool.get("metadata", {})
+        state = "INSTALLED · READY" if tool.get("installed") else "AVAILABLE · NOT INSTALLED"
+        state_color = "#35D66B" if tool.get("installed") else "#2BC4FF"
+        capabilities = metadata.get("capabilities", []) or ["General package or executable capability"]
+        integrations = metadata.get("integrations", []) or ["Standard CommandOS launcher integration"]
+        related = [self.metadata[item]["name"] for item in metadata.get("related_tools", []) if item in self.metadata]
+        command = tool.get("command") or "No launch command detected"
+        install = self.install_command(tool) or "No supported installer detected"
+        rows = "".join(f"<li style='margin:5px 0'><span style='color:#35D66B'>✓</span> {html.escape(str(value))}</li>" for value in capabilities)
+        integration_rows = "".join(f"<li style='margin:5px 0'><span style='color:#2BC4FF'>✓</span> {html.escape(str(value))}</li>" for value in integrations)
+        return f"""
+        <div style='color:#DCE7EE'>
+          <h2 style='color:#FFFFFF;margin-bottom:3px'>{html.escape(tool.get('name', 'Tool').upper())}</h2>
+          <div style='color:{state_color};font-weight:700;margin-bottom:14px'>● {state}</div>
+          <hr style='color:#1A4058'>
+          <h3 style='color:#8FDFFF'>Description</h3><p>{html.escape(tool.get('description', ''))}</p>
+          <hr style='color:#1A4058'>
+          <h3 style='color:#8FDFFF'>Installation</h3>
+          <table cellspacing='5'><tr><td style='color:#8298A8'>Status</td><td style='color:{state_color}'>{state}</td></tr>
+          <tr><td style='color:#8298A8'>Package</td><td>{html.escape(str(tool.get('package', '—')))}</td></tr>
+          <tr><td style='color:#8298A8'>Type</td><td>{html.escape(str(metadata.get('type', tool.get('kind', 'tool'))).upper())}</td></tr></table>
+          <hr style='color:#1A4058'><h3 style='color:#8FDFFF'>Capabilities</h3><ul style='list-style:none;margin-left:0'>{rows}</ul>
+          <hr style='color:#1A4058'><h3 style='color:#8FDFFF'>CommandOS Integration</h3><ul style='list-style:none;margin-left:0'>{integration_rows}</ul>
+          <hr style='color:#1A4058'><h3 style='color:#8FDFFF'>Commands</h3>
+          <p><b>Launch</b><br><code>{html.escape(command)}</code></p><p><b>Install / repair</b><br><code>{html.escape(install)}</code></p>
+          <hr style='color:#1A4058'><h3 style='color:#8FDFFF'>Related</h3><p>{html.escape(', '.join(related) if related else 'No related tools declared')}</p>
+        </div>"""
+
+    def tool_information_html(self, tool):
+        metadata = tool.get("metadata", {})
+        ready = "READY" if tool.get("installed") and tool.get("command") else "INSTALLED" if tool.get("installed") else "AVAILABLE"
+        ready_color = "#35D66B" if tool.get("installed") else "#2BC4FF"
+        return f"""
+        <h3 style='color:#FFFFFF'>TOOL INFORMATION</h3>
+        <table cellspacing='5'>
+          <tr><td style='color:#8298A8'>Equipment status</td><td style='color:{ready_color};font-weight:700'>{ready}</td></tr>
+          <tr><td style='color:#8298A8'>Source</td><td>{html.escape(str(tool.get('kind', 'tool')).upper())}</td></tr>
+          <tr><td style='color:#8298A8'>Category</td><td>{html.escape(str(tool.get('group', '—')))}</td></tr>
+          <tr><td style='color:#8298A8'>Package / App ID</td><td>{html.escape(str(tool.get('package', '—')))}</td></tr>
+          <tr><td style='color:#8298A8'>Recommended</td><td>{'CommandOS recommended' if metadata.get('recommended') else 'Standard inventory item'}</td></tr>
+          <tr><td style='color:#8298A8'>Launch command</td><td><code>{html.escape(str(tool.get('command') or 'Not detected'))}</code></td></tr>
+        </table>"""
 
     def guide_text(self, tool):
         if tool.get("kind") == "collection":
@@ -3233,6 +4464,32 @@ class ReaderFullscreenDialog(QDialog):
         super().keyPressEvent(event)
 
 
+class KnowledgeReadinessGauge(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.score = 0
+        self.setFixedSize(142, 142)
+
+    def set_score(self, score):
+        self.score = max(0, min(100, int(score)))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(11, 11, -11, -11)
+        painter.setPen(QPen(QColor("#17364C"), 14)); painter.drawArc(rect, 0, 360 * 16)
+        color = QColor("#42E978" if self.score >= 80 else "#2BC4FF" if self.score >= 50 else "#FFBF32")
+        painter.setPen(QPen(color, 14, Qt.SolidLine, Qt.RoundCap))
+        painter.drawArc(rect, 90 * 16, -int(360 * 16 * self.score / 100))
+        painter.setPen(QColor("#FFFFFF")); painter.setFont(QFont("Inter", 25, QFont.Bold))
+        painter.drawText(QRectF(0, 33, self.width(), 36), Qt.AlignCenter, f"{self.score}%")
+        painter.setPen(QColor("#DCE7EE")); painter.setFont(QFont("Inter", 8, QFont.Bold))
+        painter.drawText(QRectF(0, 67, self.width(), 17), Qt.AlignCenter, "KNOWLEDGE READY")
+        painter.setPen(color); painter.setFont(QFont("Inter", 7, QFont.Bold))
+        label = "OFFLINE READY" if self.score >= 80 else "BUILDING SEARCH INDEX" if self.score else "SETUP NEEDED"
+        painter.drawText(QRectF(0, 84, self.width(), 17), Qt.AlignCenter, label)
+
+
 class OfflineKnowledgePage(QWidget):
     def __init__(self, parent_window):
         super().__init__()
@@ -3259,7 +4516,7 @@ class OfflineKnowledgePage(QWidget):
         self.zim_list = QListWidget()
         self.zim_list.itemDoubleClicked.connect(lambda _: self.open_selected_library_item())
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search all offline knowledge…")
+        self.search_input.setPlaceholderText("Search Offline Knowledge…")
         self.search_input.returnPressed.connect(self.search_knowledge)
         self.search_results = QListWidget()
         self.search_results.itemDoubleClicked.connect(lambda _: self.open_search_result())
@@ -3281,6 +4538,7 @@ class OfflineKnowledgePage(QWidget):
         self.result = QTextEdit()
         self.result.setReadOnly(True)
         self.result.setObjectName("textPanel")
+        self.result.setMaximumHeight(90)
 
         layout = QVBoxLayout(self)
         title = QLabel("OFFLINE KNOWLEDGE")
@@ -3292,7 +4550,19 @@ class OfflineKnowledgePage(QWidget):
         search_button.clicked.connect(self.search_knowledge)
         search_row.addWidget(search_button)
         layout.addLayout(search_row)
+        knowledge_filters = QHBoxLayout(); knowledge_filters.setSpacing(6)
+        filter_title = QLabel("FILTER"); filter_title.setObjectName("knowledgeFilterLabel"); knowledge_filters.addWidget(filter_title)
+        self.knowledge_format_filters = {}
+        for label, formats in (("PDF", ("PDF",)), ("Markdown", ("MARKDOWN",)), ("Books", ("EPUB",)), ("Wikipedia", ("ZIM",))):
+            chip = QPushButton(label); chip.setObjectName("knowledgeFilterChip"); chip.setCheckable(True)
+            chip.toggled.connect(lambda _: self.search_knowledge() if len(self.search_input.text().strip()) >= 2 else None)
+            knowledge_filters.addWidget(chip); self.knowledge_format_filters[label.lower()] = (chip, formats)
+        for label in ("Linux", "Programming"):
+            chip = QPushButton(label); chip.setObjectName("knowledgeFilterChip")
+            chip.clicked.connect(lambda checked=False, topic=label: self.quick_knowledge_search(topic)); knowledge_filters.addWidget(chip)
+        knowledge_filters.addStretch(); layout.addLayout(knowledge_filters)
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("offlineTabs")
         self.tabs.addTab(self.home_page(), "Home")
         self.tabs.addTab(self.libraries_page(), "Libraries")
         self.tabs.addTab(self.search_page(), "Search")
@@ -3305,6 +4575,9 @@ class OfflineKnowledgePage(QWidget):
         self.scan_poll = QTimer(self)
         self.scan_poll.timeout.connect(self.finish_scan)
         self.scan_poll.start(100)
+        self.reading_progress_timer = QTimer(self)
+        self.reading_progress_timer.timeout.connect(self.capture_reading_progress)
+        self.reading_progress_timer.start(5000)
         self.load_config()
         self.scan_locations()
 
@@ -3331,18 +4604,158 @@ class OfflineKnowledgePage(QWidget):
     def home_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        readiness, readiness_layout = self.panel("Offline Readiness")
-        readiness_layout.addWidget(self.home_status)
-        layout.addWidget(readiness)
-        storage, storage_layout = self.panel("Knowledge Storage")
-        storage_layout.addWidget(self.storage_status)
-        layout.addWidget(storage)
-        recent, recent_layout = self.panel("Recently Viewed")
+        layout.setContentsMargins(4, 8, 4, 4); layout.setSpacing(10)
+
+        stats = QHBoxLayout(); stats.setSpacing(8)
+        self.knowledge_stats = {}
+        for key, icon, label, context in (("libraries", "▤", "LIBRARIES", "Configured"), ("documents", "▥", "DOCUMENTS", "Available offline"),
+                                          ("bookmarks", "★", "BOOKMARKS", "Saved"), ("storage", "▰", "STORAGE", "Knowledge used"),
+                                          ("indexed", "⌕", "INDEXED", "Full-text searchable")):
+            card = QFrame(); card.setObjectName("knowledgeStatCard")
+            box = QVBoxLayout(card); box.setContentsMargins(12, 8, 12, 8); box.setSpacing(1)
+            icon_label = QLabel(icon); icon_label.setObjectName("knowledgeStatIcon")
+            value = QLabel("—"); value.setObjectName("knowledgeStatValue")
+            caption = QLabel(label); caption.setObjectName("knowledgeStatLabel")
+            subtitle = QLabel(context); subtitle.setObjectName("knowledgeStatContext")
+            row = QHBoxLayout(); row.addWidget(icon_label); row.addStretch(); row.addWidget(value)
+            box.addLayout(row); box.addWidget(caption); box.addWidget(subtitle); stats.addWidget(card, 1); self.knowledge_stats[key] = value
+        top = QGridLayout(); top.setSpacing(10)
+        readiness, readiness_layout = self.panel("◈   KNOWLEDGE READINESS")
+        ready_row = QHBoxLayout(); ready_row.setSpacing(14)
+        self.knowledge_gauge = KnowledgeReadinessGauge()
+        ready_row.addWidget(self.knowledge_gauge, 0, Qt.AlignCenter); ready_row.addWidget(self.home_status, 1)
+        readiness_layout.addLayout(ready_row)
+        diagnostics = QPushButton("VIEW DIAGNOSTICS"); diagnostics.setObjectName("knowledgeSecondaryButton"); diagnostics.clicked.connect(lambda: self.result.setText(self.home_status.text()))
+        readiness_layout.addWidget(diagnostics)
+        top.addWidget(readiness, 0, 1)
+
+        assistant, assistant_layout = self.panel("✦   COMMAND AI")
+        assistant_note = QLabel("Ask your offline library. Answers are grounded in locally indexed documents.")
+        assistant_note.setObjectName("knowledgeMuted"); assistant_note.setWordWrap(True); assistant_layout.addWidget(assistant_note)
+        self.command_ai_input = QLineEdit(); self.command_ai_input.setPlaceholderText("How do I rebuild GRUB?")
+        self.command_ai_input.returnPressed.connect(self.ask_offline_library); assistant_layout.addWidget(self.command_ai_input)
+        ask = QPushButton("ASK OFFLINE LIBRARY"); ask.setObjectName("knowledgePrimaryButton"); ask.clicked.connect(self.ask_offline_library); assistant_layout.addWidget(ask)
+        suggestion_title = QLabel("SUGGESTED QUESTIONS"); suggestion_title.setObjectName("knowledgeMiniTitle"); assistant_layout.addWidget(suggestion_title)
+        suggestion_grid = QGridLayout(); suggestion_grid.setSpacing(5)
+        for index, question in enumerate(("How do I rebuild GRUB?", "Explain Docker networking", "How do I recover Btrfs?",
+                                          "Wireshark capture filters", "Python virtual environments")):
+            suggestion = QPushButton(question); suggestion.setObjectName("knowledgeSuggestion")
+            suggestion.clicked.connect(lambda checked=False, value=question: self.ask_suggested_question(value))
+            suggestion_grid.addWidget(suggestion, index // 2, index % 2)
+        assistant_layout.addLayout(suggestion_grid)
+        self.recent_questions = QLabel("RECENT QUESTIONS\nNothing asked yet.")
+        self.recent_questions.setObjectName("knowledgeRecentQuestions"); self.recent_questions.setWordWrap(True); assistant_layout.addWidget(self.recent_questions)
+        top.addWidget(assistant, 0, 0); top.setColumnStretch(0, 1); top.setColumnStretch(1, 1)
+        layout.addLayout(top)
+
+        middle = QGridLayout(); middle.setSpacing(10)
+        resume, resume_layout = self.panel("▶   CONTINUE READING")
+        resume_row = QHBoxLayout(); resume_row.setSpacing(14)
+        self.continue_cover = QLabel("📘"); self.continue_cover.setObjectName("knowledgeCover"); self.continue_cover.setAlignment(Qt.AlignCenter); self.continue_cover.setFixedSize(88, 112)
+        resume_copy = QVBoxLayout(); resume_copy.setSpacing(4)
+        self.continue_reading = QLabel("No reading history yet. Open a document to begin.")
+        self.continue_reading.setObjectName("knowledgeFeatureText"); self.continue_reading.setWordWrap(True); resume_copy.addWidget(self.continue_reading)
+        progress_title = QLabel("READING PROGRESS"); progress_title.setObjectName("knowledgeMiniTitle"); resume_copy.addWidget(progress_title)
+        self.reading_progress = QProgressBar(); self.reading_progress.setObjectName("readingProgress"); self.reading_progress.setRange(0, 100); self.reading_progress.setValue(0); self.reading_progress.setFormat("%p%")
+        resume_copy.addWidget(self.reading_progress)
+        self.reading_remaining = QLabel("Progress tracking begins when you open a document."); self.reading_remaining.setObjectName("knowledgeMuted"); resume_copy.addWidget(self.reading_remaining)
+        resume_row.addWidget(self.continue_cover); resume_row.addLayout(resume_copy, 1); resume_layout.addLayout(resume_row)
+        resume_button = QPushButton("RESUME"); resume_button.setObjectName("knowledgePrimaryButton"); resume_button.clicked.connect(self.resume_reading); resume_layout.addWidget(resume_button)
+        middle.addWidget(resume, 0, 0)
+        recent, recent_layout = self.panel("◷   RECENTLY VIEWED")
         self.recent_list = QListWidget()
+        self.recent_list.setObjectName("knowledgeShelf")
+        self.recent_list.setMaximumHeight(155)
         self.recent_list.itemDoubleClicked.connect(lambda _: self.open_recent())
         recent_layout.addWidget(self.recent_list)
-        layout.addWidget(recent)
+        middle.addWidget(recent, 0, 1); middle.setColumnStretch(0, 1); middle.setColumnStretch(1, 1)
+        layout.insertLayout(0, middle)
+        layout.addLayout(stats)
+
+        lower = QGridLayout(); lower.setSpacing(10)
+        storage, storage_layout = self.panel("▰   KNOWLEDGE STORAGE")
+        self.storage_bars = {}
+        for key, label, role in (("knowledge", "KNOWLEDGE", "knowledge"), ("index", "SEARCH INDEX", "index"), ("free", "FREE SPACE", "free")):
+            row = QHBoxLayout(); name = QLabel(label); name.setObjectName("knowledgeStorageLabel"); value = QLabel("—"); value.setObjectName("knowledgeStorageValue")
+            row.addWidget(name); row.addStretch(); row.addWidget(value); storage_layout.addLayout(row)
+            bar = QProgressBar(); bar.setObjectName("knowledgeStorageBar"); bar.setProperty("role", role); bar.setRange(0, 100); bar.setTextVisible(False); storage_layout.addWidget(bar)
+            self.storage_bars[key] = (bar, value)
+        self.storage_bar = self.storage_bars["knowledge"][0]
+        storage_layout.addWidget(self.storage_status)
+        lower.addWidget(storage, 0, 0)
+        categories, categories_layout = self.panel("▦   LIBRARY CATEGORIES")
+        self.knowledge_categories = QLabel("No indexed categories yet."); self.knowledge_categories.setObjectName("knowledgeCategories"); self.knowledge_categories.setWordWrap(True)
+        categories_layout.addWidget(self.knowledge_categories)
+        sources = QLabel("SOURCES  ·  Wikipedia  ·  PDFs  ·  Markdown  ·  Books  ·  Man Pages  ·  GitHub Docs")
+        sources.setObjectName("knowledgeSources"); sources.setWordWrap(True); categories_layout.addWidget(sources)
+        topics = QLabel("MOST USED TOPICS  ·  Linux  ·  Docker  ·  Networking  ·  Python  ·  Recovery")
+        topics.setObjectName("knowledgeSources"); topics.setWordWrap(True); categories_layout.addWidget(topics)
+        lower.addWidget(categories, 0, 1)
+        lower.setColumnStretch(0, 1); lower.setColumnStretch(1, 1); layout.addLayout(lower)
+
+        activity = QGridLayout(); activity.setSpacing(10)
+        added, added_layout = self.panel("＋   RECENTLY ADDED")
+        self.recently_added = QLabel("Monitoring knowledge libraries…"); self.recently_added.setObjectName("knowledgeFeatureText"); self.recently_added.setWordWrap(True); added_layout.addWidget(self.recently_added)
+        activity.addWidget(added, 0, 0)
+        quick, quick_layout = self.panel("⚡   QUICK ACTIONS")
+        actions = QHBoxLayout()
+        for icon, label, handler in (("＋", "ADD LIBRARY", self.select_library_location), ("▥", "IMPORT PDFS", self.select_library_location),
+                                     ("◎", "WIKIPEDIA", self.select_library_location), ("⌕", "SEARCH", lambda: self.tabs.setCurrentIndex(2))):
+            button = QToolButton(); button.setText(f"{icon}\n{label}"); button.setObjectName("knowledgeActionButton")
+            button.setToolButtonStyle(Qt.ToolButtonTextOnly); button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed); button.setFixedHeight(72)
+            button.clicked.connect(handler); actions.addWidget(button)
+        quick_layout.addLayout(actions); activity.addWidget(quick, 0, 1)
+        activity.setColumnStretch(0, 1); activity.setColumnStretch(1, 1); layout.addLayout(activity)
         return page
+
+    def ask_offline_library(self):
+        query = self.command_ai_input.text().strip()
+        if not query:
+            self.result.setPlainText("Ask a question about your offline library.")
+            return
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.execute("INSERT INTO knowledge_questions(question,asked_at) VALUES(?,?)", (query, time.strftime("%Y-%m-%d %H:%M:%S")))
+            db.execute("DELETE FROM knowledge_questions WHERE id NOT IN (SELECT id FROM knowledge_questions ORDER BY id DESC LIMIT 30)")
+            db.commit()
+        self.search_input.setText(query)
+        self.search_knowledge()
+        self.refresh_knowledge_summary()
+
+    def ask_suggested_question(self, question):
+        self.command_ai_input.setText(question)
+        self.ask_offline_library()
+
+    def quick_knowledge_search(self, topic):
+        self.search_input.setText(topic)
+        self.search_knowledge()
+
+    def resume_reading(self):
+        if self.recent_list.count():
+            self.recent_list.item(0).setSelected(True)
+            self.open_recent()
+        else:
+            self.tabs.setCurrentIndex(1)
+
+    def capture_reading_progress(self):
+        if not self.current_document:
+            return
+        path = self.current_document.get("path", "")
+        script = """(() => { const d=document.documentElement; const max=Math.max(0,d.scrollHeight-window.innerHeight); return max ? Math.round(window.scrollY/max*100) : 0; })()"""
+        self.reader.page().runJavaScript(script, lambda value, document_path=path: self.save_reading_progress(document_path, value))
+
+    def save_reading_progress(self, document_path, value):
+        try:
+            progress = max(0, min(100, int(value or 0)))
+        except (TypeError, ValueError):
+            return
+        with sqlite3.connect(OFFLINE_DB_FILE) as db:
+            db.execute("INSERT INTO reading_progress(document_path,progress,updated_at) VALUES(?,?,?) "
+                       "ON CONFLICT(document_path) DO UPDATE SET progress=excluded.progress,updated_at=excluded.updated_at",
+                       (document_path, progress, time.strftime("%Y-%m-%d %H:%M:%S")))
+            db.commit()
+        if self.current_document and self.current_document.get("path") == document_path:
+            self.reading_progress.setValue(progress)
+            self.reading_remaining.setText(f"Estimated remaining: {max(1, round((100 - progress) * .22))} minutes" if progress else "Progress tracking is active while you read.")
 
     def libraries_page(self):
         page = QWidget()
@@ -3443,6 +4856,13 @@ class OfflineKnowledgePage(QWidget):
                     id INTEGER PRIMARY KEY, document_path TEXT NOT NULL, title TEXT NOT NULL,
                     locator TEXT, viewed_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS reading_progress (
+                    document_path TEXT PRIMARY KEY, progress INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS knowledge_questions (
+                    id INTEGER PRIMARY KEY, question TEXT NOT NULL, asked_at TEXT NOT NULL
+                );
             """)
 
     def index_locations(self, locations):
@@ -3532,7 +4952,9 @@ class OfflineKnowledgePage(QWidget):
         with sqlite3.connect(OFFLINE_DB_FILE) as db:
             rows = db.execute("SELECT path,title,format,size,indexed_at FROM documents WHERE available=1 ORDER BY title COLLATE NOCASE").fetchall()
         for path, title, fmt, size, indexed_at in rows:
-            item = QListWidgetItem(f"{title.upper()}\n{fmt}  ·  {self.format_size(size)}  ·  AVAILABLE OFFLINE\n{path}")
+            cover = {"PDF": "📕", "EPUB": "📗", "ZIM": "📘", "MARKDOWN": "📓", "HTML": "📙", "TEXT": "📄"}.get(fmt, "📚")
+            item = QListWidgetItem(f"{cover}  {title.upper()}\n     {fmt}  ·  {self.format_size(size)}  ·  INDEXED  ·  AVAILABLE OFFLINE\n     {path}")
+            item.setSizeHint(QSize(500, 68))
             item.setData(Qt.UserRole, {"path": path, "title": title, "format": fmt, "size": size, "indexed_at": indexed_at})
             self.zim_list.addItem(item)
 
@@ -3560,21 +4982,83 @@ class OfflineKnowledgePage(QWidget):
 
     def refresh_knowledge_summary(self):
         with sqlite3.connect(OFFLINE_DB_FILE) as db:
-            documents, total_size, available = db.execute("SELECT COUNT(*),COALESCE(SUM(size),0),SUM(CASE WHEN available=1 THEN 1 ELSE 0 END) FROM documents").fetchone()
+            documents, total_size, available = db.execute("SELECT COUNT(*),COALESCE(SUM(CASE WHEN available=1 THEN size ELSE 0 END),0),SUM(CASE WHEN available=1 THEN 1 ELSE 0 END) FROM documents").fetchone()
             libraries = db.execute("SELECT COUNT(*) FROM libraries WHERE available=1").fetchone()[0]
             indexed_text = db.execute("SELECT COUNT(*) FROM documents WHERE available=1 AND length(content)>0").fetchone()[0]
             recent = db.execute("SELECT document_path,title,locator,viewed_at FROM history ORDER BY id DESC LIMIT 12").fetchall()
             bookmarks = db.execute("SELECT id,document_path,title,locator,created_at FROM bookmarks ORDER BY id DESC").fetchall()
-        free = shutil.disk_usage(CONFIG_DIR).free
-        readiness = "READY" if available else "NOT CONFIGURED"
-        self.home_status.setText(f"LOCAL LIBRARY  {readiness}\nLIBRARIES      {libraries}\nDOCUMENTS      {available or 0} AVAILABLE / {documents} KNOWN\nFULL TEXT      {indexed_text} INDEXED\nZIM BACKEND    {'READY' if command_exists('kiwix-serve') else 'MISSING'}\nLOCAL AI       {'AVAILABLE' if command_exists('ollama') else 'OFFLINE'}")
+            formats = db.execute("SELECT format,COUNT(*) FROM documents WHERE available=1 GROUP BY format ORDER BY COUNT(*) DESC").fetchall()
+            recently_added = db.execute("SELECT title,format,indexed_at FROM documents WHERE available=1 ORDER BY indexed_at DESC LIMIT 4").fetchall()
+            questions = db.execute("SELECT question,asked_at FROM knowledge_questions ORDER BY id DESC LIMIT 3").fetchall()
+            recent_progress = db.execute("SELECT progress FROM reading_progress WHERE document_path=?", (recent[0][0],)).fetchone() if recent else None
+        disk = shutil.disk_usage(CONFIG_DIR)
+        free = disk.free
+        available = available or 0
+        indexed_percent = round(indexed_text / max(1, available) * 100) if available else 0
+        reader_ready = command_exists("kiwix-serve") or available > 0
+        ai_ready = command_exists("ollama")
+        score = min(100, (20 if libraries else 0) + (20 if available else 0) + round(indexed_percent * .3) + (15 if reader_ready else 0) + (15 if ai_ready else 0))
+        self.knowledge_gauge.set_score(score)
+        checklist = [
+            ("Libraries", bool(libraries), f"{libraries} ready" if libraries else "Not configured"),
+            ("Search Index", bool(indexed_text), f"{indexed_percent}% indexed" if available else "Waiting for documents"),
+            ("AI Integration", ai_ready, "Enabled" if ai_ready else "Ollama offline"),
+            ("Reader", reader_ready, "Ready" if reader_ready else "Backend needed"),
+            ("Bookmarks", True, f"{len(bookmarks)} synced"),
+        ]
+        self.home_status.setText("<table cellspacing='4'>" + "".join(
+            f"<tr><td style='color:{'#42E978' if ready else '#FFBF32'}'>{'✓' if ready else '⚠'}</td>"
+            f"<td style='color:#DCE7EE;padding-right:18px'>{label}</td><td style='color:#9DB0BD'>{detail}</td></tr>"
+            for label, ready, detail in checklist
+        ) + "</table>")
+        self.knowledge_stats["libraries"].setText(str(libraries))
+        self.knowledge_stats["documents"].setText(f"{available:,}")
+        self.knowledge_stats["bookmarks"].setText(str(len(bookmarks)))
+        self.knowledge_stats["storage"].setText(self.format_size(total_size))
+        self.knowledge_stats["indexed"].setText(f"{indexed_percent}%")
         index_size = OFFLINE_DB_FILE.stat().st_size if OFFLINE_DB_FILE.exists() else 0
-        self.storage_status.setText(f"KNOWLEDGE DATA  {self.format_size(total_size)}\nSEARCH DATABASE {self.format_size(index_size)}\nAVAILABLE       {self.format_size(free)}\nQuick integrity checks use file availability, size, and modification time. Full SHA-256 verification is not yet scheduled.")
+        knowledge_percent = round(total_size / max(1, disk.total) * 100)
+        index_percent = round(index_size / max(1, disk.total) * 100)
+        free_percent = round(free / max(1, disk.total) * 100)
+        for key, amount, percentage in (("knowledge", total_size, knowledge_percent), ("index", index_size, index_percent), ("free", free, free_percent)):
+            bar, value = self.storage_bars[key]; bar.setValue(max(1, percentage) if amount else 0); value.setText(self.format_size(amount))
+        self.storage_status.setText(f"KNOWLEDGE DATA  {self.format_size(total_size)}   ·   SEARCH INDEX  {self.format_size(index_size)}\nFREE SPACE  {self.format_size(free)}   ·   Libraries remain available without a network connection.")
+        category_colors = ["#2BC4FF", "#A65DFF", "#42E978", "#FFBF32", "#F07C55"]
+        self.knowledge_categories.setText("<br><br>".join(
+            f"<span style='color:{category_colors[index % len(category_colors)]};font-size:18px'>▣</span>  <b style='color:#FFFFFF'>{html.escape(fmt.title())}</b>"
+            f"<br><span style='color:#8298A8;margin-left:20px'>{count} document{'s' if count != 1 else ''} · Indexed offline</span>"
+            for index, (fmt, count) in enumerate(formats)
+        ) or "<b style='color:#FFFFFF'>📚 Wikipedia</b>  <span style='color:#8298A8'>0 articles</span><br><br>"
+             "<b style='color:#FFFFFF'>📘 Manuals</b>  <span style='color:#8298A8'>0 documents</span><br><br>"
+             "<b style='color:#FFFFFF'>📄 PDFs</b>  <span style='color:#8298A8'>0 documents</span><br><br>"
+             "<b style='color:#FFFFFF'>▤ Markdown</b>  <span style='color:#8298A8'>0 notes</span>")
+        self.recently_added.setText("<br>".join(
+            f"<span style='color:#2BC4FF'>▥</span> <b>{html.escape(title)}</b>  <span style='color:#8298A8'>{fmt} · {indexed_at or 'Indexed'}</span>"
+            for title, fmt, indexed_at in recently_added
+        ) or "<b style='color:#FFFFFF'>Nothing here yet.</b><br><span style='color:#8298A8'>Import a PDF, Wikipedia ZIM, or documentation library to get started.</span>")
+        self.recent_questions.setText("<b style='color:#8FDFFF'>RECENT QUESTIONS</b><br>" + ("<br>".join(
+            f"• {html.escape(question)} <span style='color:#6F899B'>· {asked_at[11:16]}</span>" for question, asked_at in questions
+        ) if questions else "<span style='color:#8298A8'>Nothing asked yet.</span>"))
         self.recent_list.clear()
-        for path, title, locator, viewed_at in recent:
-            item = QListWidgetItem(f"{title}\n{viewed_at}  ·  {path}")
+        for index, (path, title, locator, viewed_at) in enumerate(recent[:4]):
+            item = QListWidgetItem(f"{'📘' if index % 3 == 0 else '📗' if index % 3 == 1 else '📙'}  {title}\n     {viewed_at}  ·  Available offline")
+            item.setSizeHint(QSize(300, 54))
             item.setData(Qt.UserRole, {"path": path, "title": title, "locator": locator})
             self.recent_list.addItem(item)
+        if recent:
+            path, title, locator, viewed_at = recent[0]
+            fmt = Path(path).suffix.lstrip(".").upper() or "DOCUMENT"
+            library_name = Path(path).parent.name or "Offline Library"
+            progress = int(recent_progress[0]) if recent_progress else 0
+            self.continue_cover.setText({"ZIM": "🌍", "PDF": "📕", "EPUB": "📗", "MD": "📓"}.get(fmt, "📘"))
+            self.continue_reading.setText(f"<b style='color:#FFFFFF;font-size:16px'>{html.escape(title)}</b><br>"
+                                          f"<span style='color:#2BC4FF'>{html.escape(library_name)} · {fmt}</span><br>"
+                                          f"<span style='color:#8298A8'>Last opened: {viewed_at[:10]}</span>")
+            self.reading_progress.setValue(progress)
+            self.reading_remaining.setText(f"Estimated remaining: {max(1, round((100 - progress) * .22))} minutes" if progress else "Progress tracking is active while you read.")
+        else:
+            self.continue_reading.setText("No reading history yet.<br><span style='color:#8298A8'>Open a document to begin building your offline workspace.</span>")
+            self.continue_cover.setText("📚"); self.reading_progress.setValue(0); self.reading_remaining.setText("Import a library to start reading offline.")
         self.bookmark_list.clear()
         for bookmark_id, path, title, locator, created_at in bookmarks:
             item = QListWidgetItem(f"★  {title}\n{created_at}  ·  {path}")
@@ -3588,15 +5072,18 @@ class OfflineKnowledgePage(QWidget):
             return
         tokens = [token for token in re.findall(r"[\w-]+", query) if token]
         fts_query = " AND ".join(f'"{token}"' for token in tokens)
+        selected_formats = [fmt for button, formats in self.knowledge_format_filters.values() if button.isChecked() for fmt in formats]
+        format_clause = f" AND d.format IN ({','.join('?' for _ in selected_formats)})" if selected_formats else ""
         with sqlite3.connect(OFFLINE_DB_FILE) as db:
             try:
                 rows = db.execute("SELECT d.path,d.title,d.format,d.size,snippet(document_search,2,'[',']',' … ',18) "
                                   "FROM document_search JOIN documents d ON d.id=document_search.rowid "
-                                  "WHERE document_search MATCH ? AND d.available=1 ORDER BY rank LIMIT 100", (fts_query,)).fetchall()
+                                  f"WHERE document_search MATCH ? AND d.available=1{format_clause} ORDER BY rank LIMIT 100", (fts_query, *selected_formats)).fetchall()
             except sqlite3.Error:
                 pattern = f"%{query}%"
-                rows = db.execute("SELECT path,title,format,size,substr(content,1,240) FROM documents WHERE available=1 AND (title LIKE ? OR path LIKE ? OR content LIKE ?) LIMIT 100",
-                                  (pattern, pattern, pattern)).fetchall()
+                fallback_format = f" AND format IN ({','.join('?' for _ in selected_formats)})" if selected_formats else ""
+                rows = db.execute(f"SELECT path,title,format,size,substr(content,1,240) FROM documents WHERE available=1 AND (title LIKE ? OR path LIKE ? OR content LIKE ?){fallback_format} LIMIT 100",
+                                  (pattern, pattern, pattern, *selected_formats)).fetchall()
         self.search_results.clear()
         for path, title, fmt, size, snippet in rows:
             item = QListWidgetItem(f"{title.upper()}  ·  {fmt}  ·  {self.format_size(size)}\n{(snippet or 'Metadata match').replace(chr(10), ' ')}\n{path}")
@@ -6016,7 +7503,7 @@ class DeploymentPage(QWidget):
             "schema_version": 1,
             "system_profiles": [{
                 "id": "commandos_workstation", "name": "CommandOS Workstation", "revision": 1,
-                "type": "system_profile", "required_packages": ["base", "linux-cachyos"],
+                "type": "system_profile", "required_packages": ["base", "linux-commandos", "commandos-hooks", "commandos-settings"],
                 "optional_packages": ["plasma-meta", "command-centre"], "services": [],
                 "tool_collections": ["commandos-base"], "policies": {"release_channel": "development"},
             }],
@@ -6618,6 +8105,20 @@ class CommandAppsPage(QWidget):
         self.widget_install = QPushButton("Install")
         self.widget_install.setObjectName("primaryButton")
         self.widget_install.clicked.connect(self.install_command_widget)
+        self.pdf_status = QLabel("Checking Command PDF…")
+        self.pdf_status.setObjectName("muted")
+        self.pdf_install = QPushButton("Install")
+        self.pdf_install.setObjectName("primaryButton")
+        self.pdf_install.clicked.connect(self.install_command_pdf)
+        self.pdf_open = QPushButton("Open")
+        self.pdf_open.clicked.connect(self.open_command_pdf)
+        self.pdf_remove = QPushButton("Uninstall")
+        self.pdf_remove.clicked.connect(self.uninstall_command_pdf)
+        self.curated_apps_status = QLabel("Checking curated app collection…")
+        self.curated_apps_status.setObjectName("muted")
+        self.curated_apps_install = QPushButton("INSTALL ALL CURATED APPS")
+        self.curated_apps_install.setObjectName("primaryButton")
+        self.curated_apps_install.clicked.connect(self.install_curated_apps)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setObjectName("textPanel")
@@ -6639,8 +8140,9 @@ class CommandAppsPage(QWidget):
 
         cards = QGridLayout()
         cards.addWidget(self.command_widget_card(), 0, 0)
-        cards.addWidget(self.installer_card(), 0, 1)
-        cards.addWidget(self.command_centre_update_card(), 1, 0, 1, 2)
+        cards.addWidget(self.command_pdf_card(), 0, 1)
+        cards.addWidget(self.curated_apps_card(), 1, 0, 1, 2)
+        cards.addWidget(self.command_centre_update_card(), 2, 0, 1, 2)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
 
@@ -6665,7 +8167,7 @@ class CommandAppsPage(QWidget):
         return frame, layout
 
     def command_widget_card(self):
-        frame, layout = self.panel("CW   Command Widget")
+        frame, layout = self.panel(f"CW   Command Widget · v{COMMAND_WIDGET_VERSION}")
         description = QLabel(
             "A KDE Plasma 6 system telemetry widget for CommandOS. It displays power mode, CPU, memory, GPU, storage, fans, network, VPN, and battery status."
         )
@@ -6687,32 +8189,137 @@ class CommandAppsPage(QWidget):
         layout.addLayout(actions)
         return frame
 
-    def installer_card(self):
-        frame, layout = self.panel("CI   CommandOS Installer")
+    def command_pdf_card(self):
+        frame, layout = self.panel("CP   Command PDF")
         description = QLabel(
-            "The planned graphical installer for deploying CommandOS to physical computers and virtual machines."
+            "Read, convert, edit, and visibly sign PDF documents with a private, local-first CommandOS application."
         )
         description.setWordWrap(True)
         description.setObjectName("muted")
-        features = QLabel("PLANNED\n• Guided disk setup\n• User and locale configuration\n• CommandOS profile selection\n• Offline installation support")
+        features = QLabel("INCLUDES\n• Native PDF viewer and trackpad gestures\n• Text boxes, page edits and visible signatures\n• PDF to DOCX, images and text\n• Drag-and-drop opening and PDF merging")
         features.setObjectName("muted")
-        placeholder = QLabel("COMING SOON · PLACEHOLDER")
-        placeholder.setObjectName("muted")
-        button = QPushButton("Not available yet")
-        button.setDisabled(True)
+        features.setWordWrap(True)
+        actions = QHBoxLayout()
+        actions.addWidget(self.pdf_install)
+        actions.addWidget(self.pdf_open)
+        actions.addWidget(self.pdf_remove)
+        actions.addStretch()
         layout.addWidget(description)
         layout.addWidget(features)
         layout.addStretch()
-        layout.addWidget(placeholder)
-        layout.addWidget(button)
+        layout.addWidget(self.pdf_status)
+        layout.addLayout(actions)
         return frame
+
+    def curated_apps_card(self):
+        frame, layout = self.panel("CA   Command Curated Apps")
+        description = QLabel(
+            "A portable collection of Command-selected applications for a fresh CachyOS installation. One click previews and installs everything in the collection that is not already present."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        features = QLabel("INCLUDES\n• Official repository applications\n• Selected AUR applications\n• Selected Flatpak applications\n• Missing-app detection before installation")
+        features.setObjectName("muted")
+        features.setWordWrap(True)
+        actions = QHBoxLayout()
+        actions.addWidget(self.curated_apps_install)
+        actions.addStretch()
+        layout.addWidget(description)
+        layout.addWidget(features)
+        layout.addWidget(self.curated_apps_status)
+        layout.addLayout(actions)
+        return frame
+
+    @staticmethod
+    def valid_package_names(output):
+        return sorted({name.strip() for name in output.splitlines() if re.fullmatch(r"[A-Za-z0-9@._+:-]+", name.strip())})
+
+    def curated_apps_inventory(self):
+        explicit_files = sorted(INVENTORY_DIR.glob("pacman-explicit-*.txt"), reverse=True)
+        foreign_files = sorted(INVENTORY_DIR.glob("pacman-foreign-aur-*.txt"), reverse=True)
+        flatpak_files = sorted(INVENTORY_DIR.glob("flatpak-apps-*.txt"), reverse=True)
+        if not explicit_files:
+            return {}
+        explicit = set(self.valid_package_names(safe_read_text(explicit_files[0])))
+        foreign = set(self.valid_package_names(safe_read_text(foreign_files[0]))) if foreign_files else set()
+        flatpaks = []
+        if flatpak_files:
+            flatpaks = self.valid_package_names("\n".join(
+                line.split("\t", 1)[0] for line in safe_read_text(flatpak_files[0]).splitlines()
+            ))
+        return {
+            "repository_packages": sorted(explicit - foreign),
+            "foreign_packages": sorted(explicit & foreign),
+            "flatpak_apps": flatpaks,
+        }
+
+    def refresh_curated_apps_status(self):
+        inventory = self.curated_apps_inventory()
+        total = sum(len(inventory.get(key, [])) for key in ("repository_packages", "foreign_packages", "flatpak_apps"))
+        if total:
+            self.curated_apps_status.setText(
+                f"● {total} CURATED APPS · {len(inventory.get('repository_packages', []))} repository · "
+                f"{len(inventory.get('foreign_packages', []))} AUR/local · {len(inventory.get('flatpak_apps', []))} Flatpak"
+            )
+            self.curated_apps_install.setEnabled(True)
+        else:
+            self.curated_apps_status.setText("○ CURATED APP COLLECTION IS NOT INCLUDED")
+            self.curated_apps_install.setEnabled(False)
+
+    def install_curated_apps(self):
+        inventory = self.curated_apps_inventory()
+        if not inventory:
+            QMessageBox.warning(self, "Command Curated Apps", "The curated app collection is not included in this installation.")
+            return
+
+        installed = set(self.valid_package_names(run_text(["pacman", "-Qq"], 20)[0])) if command_exists("pacman") else set()
+        installed_flatpaks = set(self.valid_package_names(run_text(["flatpak", "list", "--app", "--columns=application"], 20)[0])) if command_exists("flatpak") else set()
+        repository = [name for name in inventory.get("repository_packages", []) if name not in installed]
+        foreign = [name for name in inventory.get("foreign_packages", []) if name not in installed]
+        flatpaks = [name for name in inventory.get("flatpak_apps", []) if name not in installed_flatpaks]
+        missing_count = len(repository) + len(foreign) + len(flatpaks)
+        if not missing_count:
+            self.output.setPlainText("Every app in the Command Curated Apps collection is already installed.")
+            QMessageBox.information(self, "Command Curated Apps", "Every curated app is already installed.")
+            return
+
+        commands = []
+        unavailable = []
+        if repository:
+            commands.append("sudo pacman -S --needed " + " ".join(shlex.quote(name) for name in repository))
+        if foreign:
+            helper = "yay" if command_exists("yay") else "paru" if command_exists("paru") else ""
+            if helper:
+                commands.append(f"{helper} -S --needed " + " ".join(shlex.quote(name) for name in foreign))
+            else:
+                unavailable.extend(foreign)
+        if flatpaks:
+            if command_exists("flatpak"):
+                commands.append("flatpak install -y flathub " + " ".join(shlex.quote(name) for name in flatpaks))
+            else:
+                unavailable.extend(flatpaks)
+        preview_names = repository + foreign + flatpaks
+        preview = "\n".join(preview_names[:40])
+        if len(preview_names) > 40:
+            preview += f"\n… and {len(preview_names) - 40} more"
+        warning = f"\n\n{len(unavailable)} item(s) need yay/paru or Flatpak and cannot be installed in this run." if unavailable else ""
+        if not commands:
+            QMessageBox.warning(self, "Command Curated Apps", f"No supported installer is available for the {missing_count} missing app(s).")
+            return
+        if not confirm(self, "Install Command Curated Apps", f"Install {missing_count - len(unavailable)} missing app(s) from the Command Curated Apps collection?\n\n{preview}{warning}\n\nThe package managers will show their own review and authorization prompts."):
+            return
+        command = " && ".join(commands)
+        ok, terminal = launch_terminal("Install Command Curated Apps", command)
+        self.output.setPlainText(f"Command Curated Apps installation started in {terminal}." if ok else terminal)
+        if ok:
+            self.parent_window.add_history(f"Command Curated Apps installation started: {missing_count - len(unavailable)} app(s)", category="APPLICATION")
 
     def command_centre_update_card(self):
         frame, layout = self.panel("CC   Command Centre Update")
-        description = QLabel("Update from the signed public Command Centre repository. The updater verifies the repository key and configures pacman when needed.")
+        description = QLabel("Update from the public CommandOS package repository hosted on SourceForge. The updater configures pacman and retrieves the latest published release.")
         description.setWordWrap(True)
         description.setObjectName("muted")
-        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• Signed public Arch repository\n• Command-Centre-v1.0.1\n• System authorization required")
+        details = QLabel(f"CURRENT VERSION\n• v{APP_VERSION}\nSOURCE\n• SourceForge [commandos] repository\n• linux-commandos.sourceforge.io\n• HTTPS transport · system authorization required")
         details.setObjectName("muted")
         details.setWordWrap(True)
         actions = QHBoxLayout()
@@ -6720,7 +8327,7 @@ class CommandAppsPage(QWidget):
         self.command_centre_update.setObjectName("primaryButton")
         self.command_centre_update.clicked.connect(self.update_command_centre)
         repository = QPushButton("Open Repository")
-        repository.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/ebfourie7-ops/Command-Centre")))
+        repository.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://sourceforge.net/projects/linux-commandos/")))
         actions.addWidget(self.command_centre_update)
         actions.addWidget(repository)
         actions.addStretch()
@@ -6732,31 +8339,34 @@ class CommandAppsPage(QWidget):
     def update_command_centre(self):
         installer = RESOURCE_DIR / "install-command-centre-repo.sh"
         if not installer.is_file():
-            QMessageBox.warning(self, "Command Centre Update", f"Signed repository updater is missing:\n{installer}")
+            QMessageBox.warning(self, "Command Centre Update", f"SourceForge repository updater is missing:\n{installer}")
             return
         if not confirm(
             self, "Update Command Centre",
-            "Update Command Centre from its signed public Arch repository?\n\n"
-            "The repository key fingerprint will be verified before trust is added. "
-            "Pacman will request your system password and show the packages before updating.",
+            "Update Command Centre from the public SourceForge Arch repository?\n\n"
+            "Pacman will request your system password and show the package transaction before updating.",
         ):
             return
-        command = f"/bin/bash {shlex.quote(str(installer))}"
+        command = f"/bin/bash {shlex.quote(str(installer))} command-centre"
         ok, terminal = launch_terminal("Update Command Centre", command)
         self.output.setPlainText(
-            f"Signed update started in {terminal}.\n\nRepository key:\n"
-            "D6D2 8256 B728 685F 4D44 26A2 A821 4620 EA12 3648\n\n"
-            "Restart Command Centre after pacman finishes."
+            f"SourceForge update started in {terminal}.\n\nRestart Command Centre after pacman finishes."
             if ok else terminal
         )
         if ok:
-            self.parent_window.add_history("Signed Command Centre update started", category="UPDATE")
+            self.parent_window.add_history("SourceForge Command Centre update started", category="UPDATE")
 
     def widget_installed(self):
         widget = Path.home() / ".local/share/plasma/plasmoids/telemetrywidget/metadata.json"
         daemon = Path.home() / ".local/bin/telemetry-daemon"
         http_daemon = Path.home() / ".local/bin/telemetry-http-daemon"
         return widget.exists() and daemon.exists() and http_daemon.exists()
+
+    def command_pdf_user_installed(self):
+        return (Path.home() / ".local/share/command-pdf/command_pdf.py").is_file() and (Path.home() / ".local/bin/command-pdf").exists()
+
+    def command_pdf_installed(self):
+        return self.command_pdf_user_installed() or command_exists("command-pdf")
 
     def refresh(self):
         installed = self.widget_installed()
@@ -6771,39 +8381,98 @@ class CommandAppsPage(QWidget):
             self.widget_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
             self.widget_install.setText("Install unavailable")
         self.widget_install.setEnabled(source_ready)
+        self.refresh_curated_apps_status()
+        pdf_ready = (COMMAND_PDF_DIR / "install.sh").is_file()
+        pdf_installed = self.command_pdf_installed()
+        pdf_user_installed = self.command_pdf_user_installed()
+        pdf_system_installed = command_exists("command-pdf") and not pdf_user_installed
+        if pdf_system_installed:
+            self.pdf_status.setText("● INSTALLED · Command PDF is managed by the system package manager")
+            self.pdf_install.setText("Managed by pacman")
+        elif pdf_user_installed:
+            self.pdf_status.setText("● INSTALLED · User-local Command PDF application is ready")
+            self.pdf_install.setText("Reinstall / Update")
+        elif pdf_ready:
+            self.pdf_status.setText("○ AVAILABLE · Installer included with Command Centre")
+            self.pdf_install.setText("Install")
+        else:
+            self.pdf_status.setText("INSTALLER MISSING · Command Centre installation may be incomplete")
+            self.pdf_install.setText("Install unavailable")
+        self.pdf_install.setEnabled(pdf_ready and not pdf_system_installed)
+        self.pdf_open.setEnabled(pdf_installed)
+        self.pdf_remove.setEnabled(pdf_user_installed)
+
+    def install_command_pdf(self):
+        installer = RESOURCE_DIR / "install-command-centre-repo.sh"
+        if not installer.is_file():
+            QMessageBox.warning(self, "Command PDF", f"SourceForge package installer not found:\n{installer}")
+            return
+        action = "update" if self.command_pdf_installed() else "install"
+        migration = "\n\nThe older user-local copy will be removed after the system package is installed." if self.command_pdf_user_installed() else ""
+        if not confirm(self, f"{action.title()} Command PDF", f"Install Command PDF 1.1.0 from the SourceForge CommandOS repository?\n\nPacman will show the package transaction and request authorization.{migration}"):
+            return
+        command = f"/bin/bash {shlex.quote(str(installer))} command-pdf"
+        if self.command_pdf_user_installed():
+            command += f" && /bin/bash {shlex.quote(str(COMMAND_PDF_DIR / 'uninstall.sh'))}"
+        ok, terminal = launch_terminal(f"{action.title()} Command PDF", command)
+        self.output.setPlainText(f"Command PDF SourceForge {action} started in {terminal}." if ok else terminal)
+        if ok:
+            self.parent_window.add_history(f"Command PDF SourceForge {action} started", category="APPLICATION")
+
+    def open_command_pdf(self):
+        executable = Path.home() / ".local/bin/command-pdf"
+        command = str(executable) if executable.exists() else shutil.which("command-pdf")
+        if not command:
+            QMessageBox.warning(self, "Command PDF", "Command PDF is not installed.")
+            return
+        log_path = CONFIG_DIR / "command-pdf-launch.log"
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("w", encoding="utf-8")
+        process = subprocess.Popen([command], stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
+        log_handle.close()
+        QTimer.singleShot(1200, lambda launched=process, log=log_path: self.finish_command_pdf_launch(launched, log))
+
+    def finish_command_pdf_launch(self, process, log_path):
+        exit_code = process.poll()
+        if exit_code is None:
+            self.output.setPlainText("Command PDF opened successfully.")
+            self.parent_window.add_history("Command PDF opened", category="APPLICATION")
+            return
+        details = safe_read_text(log_path).strip() or f"Command PDF exited with code {exit_code}."
+        self.output.setPlainText(details)
+        QMessageBox.warning(self, "Command PDF", f"Command PDF could not start.\n\n{details[-1200:]}")
+
+    def uninstall_command_pdf(self):
+        uninstaller = COMMAND_PDF_DIR / "uninstall.sh"
+        if not uninstaller.is_file() or not confirm(self, "Uninstall Command PDF", "Remove the user-local Command PDF installation?\n\nYour PDF documents will not be removed."):
+            return
+        result = subprocess.run(["/bin/bash", str(uninstaller)], cwd=str(COMMAND_PDF_DIR), check=False, capture_output=True, text=True, timeout=60)
+        message = (result.stdout + "\n" + result.stderr).strip()
+        self.output.setPlainText(message)
+        if result.returncode == 0:
+            self.parent_window.add_history("Command PDF uninstalled", category="APPLICATION")
+        else:
+            QMessageBox.warning(self, "Command PDF", message[-1400:])
+        self.refresh()
 
     def install_command_widget(self):
-        installer = COMMAND_WIDGET_DIR / "install.sh"
+        installer = RESOURCE_DIR / "install-command-centre-repo.sh"
         if not installer.exists():
-            QMessageBox.warning(self, "Command Widget", f"Installer not found:\n{installer}")
+            QMessageBox.warning(self, "Command Widget", f"SourceForge package installer not found:\n{installer}")
             self.refresh()
             return
         action = "update" if self.widget_installed() else "install"
         if not confirm(
             self,
             f"{action.title()} Command Widget",
-            f"Run the installer included with Command Centre?\n\n/bin/bash {installer}\n\nThis copies files into your user profile and enables the two telemetry user services.",
+            f"Install Command Widget 1.1.0 from SourceForge?\n\nPacman installs the published payload, then the user installer refreshes the Plasma widget and telemetry services.",
         ):
             return
-        self.widget_install.setEnabled(False)
-        self.output.setPlainText(f"Running {installer}…")
-        QApplication.processEvents()
-        result = subprocess.run(
-            ["/bin/bash", str(installer)],
-            cwd=str(COMMAND_WIDGET_DIR),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        message = (result.stdout + "\n" + result.stderr).strip()
-        self.output.setPlainText(message or f"Installer exited with code {result.returncode}.")
-        if result.returncode == 0:
-            self.parent_window.add_history(f"Command Widget {action} completed")
-            QMessageBox.information(self, "Command Widget", f"Command Widget {action} completed successfully.")
-        else:
-            QMessageBox.warning(self, "Command Widget", f"Installation failed with exit code {result.returncode}.\n\n{message[-1200:]}")
-        self.refresh()
+        command = f"/bin/bash {shlex.quote(str(installer))} command-widget && command-widget-install"
+        ok, terminal = launch_terminal(f"{action.title()} Command Widget", command)
+        self.output.setPlainText(f"Command Widget SourceForge {action} started in {terminal}." if ok else terminal)
+        if ok:
+            self.parent_window.add_history(f"Command Widget SourceForge {action} started", category="APPLICATION")
 
     def open_widget_project(self):
         if COMMAND_WIDGET_DIR.exists():
@@ -7037,7 +8706,7 @@ class SystemTimelineDialog(QDialog):
     def __init__(self, event_store, parent=None):
         super().__init__(parent)
         self.event_store = event_store
-        self.setWindowTitle("Command OS System Timeline")
+        self.setWindowTitle("Command Centre System Timeline")
         self.resize(920, 680)
         self.category = QComboBox()
         self.category.addItems(["ALL", "SYSTEM", "UPDATE", "POWER", "SECURITY", "NETWORK", "STORAGE", "SNAPSHOT", "DRIVER", "SERVICE", "COMMAND"])
@@ -7104,6 +8773,132 @@ class PaletteDialog(QDialog):
         self.accept()
 
 
+class SidebarNavButton(QAbstractButton):
+    """Two-line navigation control with a smoothly animated cockpit accent."""
+
+    def __init__(self, module_id, icon_name, title, subtitle, parent=None):
+        super().__init__(parent)
+        self.module_id = module_id
+        self.icon_name = icon_name
+        self.title = title
+        self.subtitle = subtitle
+        self._hover_progress = 0.0
+        self._collapsed = False
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(58)
+        self.setToolTip("")
+        self.animation = QPropertyAnimation(self, b"hoverProgress", self)
+        self.animation.setDuration(150)
+        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+
+    def get_hover_progress(self):
+        return self._hover_progress
+
+    def set_hover_progress(self, value):
+        self._hover_progress = value
+        self.update()
+
+    hoverProgress = Property(float, get_hover_progress, set_hover_progress)
+
+    def enterEvent(self, event):
+        self._animate_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._animate_to(0.0)
+        super().leaveEvent(event)
+
+    def _animate_to(self, value):
+        self.animation.stop()
+        self.animation.setStartValue(self._hover_progress)
+        self.animation.setEndValue(value)
+        self.animation.start()
+
+    def set_collapsed(self, collapsed):
+        self._collapsed = collapsed
+        self.setFixedHeight(48 if collapsed else 58)
+        self.setToolTip(self.title if collapsed else "")
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        active = self.isChecked()
+        strength = 1.0 if active else self._hover_progress
+
+        if strength > 0:
+            base = QColor("#0b2536" if active else "#0a1d2a")
+            base.setAlphaF(0.35 + strength * 0.55)
+            painter.setBrush(base)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rect, 8, 8)
+
+            rail_height = rect.height() * (0.35 + strength * 0.65)
+            rail = QRectF(rect.left(), rect.center().y() - rail_height / 2, 4, rail_height)
+            rail_color = QColor("#2bd2ff")
+            rail_color.setAlphaF(0.35 + strength * 0.65)
+            painter.setBrush(rail_color)
+            painter.drawRoundedRect(rail, 2, 2)
+
+        icon_color = QColor("#eafaff" if active else "#8fa9bb")
+        if not active:
+            icon_color = self._mix(icon_color, QColor("#ffffff"), self._hover_progress)
+        self._draw_icon(painter, QPointF(28 if not self._collapsed else self.width() / 2, self.height() / 2), icon_color)
+
+        if not self._collapsed:
+            title_color = QColor("#ffffff" if active else "#c4d2dc")
+            title_color = self._mix(title_color, QColor("#ffffff"), self._hover_progress)
+            painter.setPen(title_color)
+            title_font = painter.font()
+            title_font.setPixelSize(13)
+            title_font.setWeight(QFont.DemiBold)
+            painter.setFont(title_font)
+            painter.drawText(QRectF(52, 9, self.width() - 62, 21), Qt.AlignLeft | Qt.AlignVCenter, self.title)
+
+            painter.setPen(QColor("#88a0b0" if not active else "#a8c6d8"))
+            subtitle_font = painter.font()
+            subtitle_font.setPixelSize(11)
+            subtitle_font.setWeight(QFont.Normal)
+            painter.setFont(subtitle_font)
+            painter.drawText(QRectF(52, 30, self.width() - 62, 18), Qt.AlignLeft | Qt.AlignVCenter, self.subtitle)
+
+    @staticmethod
+    def _mix(first, second, amount):
+        amount = max(0.0, min(1.0, amount))
+        return QColor(*(round(first.getRgb()[i] * (1 - amount) + second.getRgb()[i] * amount) for i in range(3)))
+
+    def _draw_icon(self, painter, centre, color):
+        """Draw a consistent set of 20 px monochrome line icons."""
+        painter.save()
+        painter.translate(centre)
+        painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        if self.icon_name == "dashboard":
+            painter.drawLine(-8, -1, 0, -8); painter.drawLine(0, -8, 8, -1)
+            painter.drawRect(QRectF(-6, -1, 12, 9)); painter.drawLine(2, 8, 2, 3)
+        elif self.icon_name == "package":
+            painter.drawRect(QRectF(-8, -6, 16, 13)); painter.drawLine(-8, -6, 0, -1)
+            painter.drawLine(8, -6, 0, -1); painter.drawLine(0, -1, 0, 7)
+        elif self.icon_name == "tools":
+            painter.drawRoundedRect(QRectF(-8, -5, 16, 12), 2, 2); painter.drawRect(QRectF(-3, -8, 6, 3))
+            painter.drawLine(-8, 0, 8, 0)
+        elif self.icon_name == "terminal":
+            painter.drawRoundedRect(QRectF(-9, -7, 18, 14), 2, 2)
+            painter.drawLine(-5, -3, -1, 0); painter.drawLine(-1, 0, -5, 3); painter.drawLine(1, 3, 5, 3)
+        elif self.icon_name == "book":
+            painter.drawRoundedRect(QRectF(-8, -7, 7, 14), 1, 1); painter.drawRoundedRect(QRectF(1, -7, 7, 14), 1, 1)
+            painter.drawLine(0, -6, 0, 7)
+        elif self.icon_name == "apps":
+            for x, y in ((-6, -6), (2, -6), (-6, 2), (2, 2)):
+                painter.drawRoundedRect(QRectF(x, y, 5, 5), 1, 1)
+        else:  # intelligence / neural network
+            painter.drawEllipse(QRectF(-7, -7, 14, 14)); painter.drawLine(-7, 0, 7, 0)
+            painter.drawLine(0, -7, 0, 7); painter.drawEllipse(QRectF(-2, -2, 4, 4))
+        painter.restore()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -7132,19 +8927,29 @@ class MainWindow(QMainWindow):
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
         self.sidebar = QVBoxLayout()
+        self.sidebar.setContentsMargins(8, 8, 8, 12)
+        self.sidebar.setSpacing(0)
         self.stack = QStackedWidget()
 
         self.sidebar.addWidget(self.brand_widget())
 
-        for module_id, icon, title in MODULES:
-            button = QPushButton(f"{icon}  {title}")
-            button.setObjectName("navButton")
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, m=module_id: self.open_module(m))
-            self.nav_buttons[module_id] = button
-            self.nav_titles[module_id] = (icon, title)
-            self.sidebar.addWidget(button)
+        module_details = {module_id: (icon, title) for module_id, icon, title in MODULES}
+        for section, module_ids in MODULE_SECTIONS:
+            section_label = QLabel(section)
+            section_label.setObjectName("sidebarSection")
+            section_label.setFixedHeight(32)
+            self.sidebar.addWidget(section_label)
+            for module_id in module_ids:
+                icon, title = module_details[module_id]
+                button = SidebarNavButton(module_id, icon, title, MODULE_DESCRIPTIONS[module_id])
+                button.clicked.connect(lambda checked=False, m=module_id: self.open_module(m))
+                self.nav_buttons[module_id] = button
+                self.nav_titles[module_id] = (icon, title)
+                self.sidebar.addWidget(button)
 
+        # Build pages independently from the visual sidebar grouping. Navigation
+        # must remain stable when modules are moved between sidebar sections.
+        for module_id, icon, title in MODULES:
             if module_id == "dashboard":
                 page = DashboardPage(self)
             elif module_id == "control":
@@ -7171,21 +8976,24 @@ class MainWindow(QMainWindow):
             scroll.setWidget(page)
             self.stack.addWidget(scroll)
 
-        self.sidebar.addStretch()
-        self.sidebar_toggle = QPushButton("≪")
+        self.sidebar.addStretch(1)
+        self.sidebar_status = self.status_widget()
+        self.sidebar.addWidget(self.sidebar_status)
+        self.sidebar_toggle = QPushButton("‹")
         self.sidebar_toggle.setObjectName("sidebarToggle")
         self.sidebar_toggle.setToolTip("Collapse sidebar (Ctrl+B)")
-        self.sidebar_toggle.setFixedHeight(40)
+        self.sidebar_toggle.setFixedSize(32, 32)
         self.sidebar_toggle.clicked.connect(self.toggle_sidebar)
-        self.sidebar.addWidget(self.sidebar_toggle)
         side = QWidget()
         side.setObjectName("sidebar")
         side.setLayout(self.sidebar)
-        side.setFixedWidth(292)
+        side.setFixedWidth(307)
         self.sidebar_widget = side
         shell.addWidget(side)
         shell.addWidget(self.stack, 1)
         self.setCentralWidget(root)
+        self.sidebar_toggle.setParent(root)
+        self.sidebar_toggle.raise_()
 
         refresh_action = QAction("Refresh", self)
         refresh_action.setShortcut("F5")
@@ -7232,24 +9040,53 @@ class MainWindow(QMainWindow):
 
         self.brand_text = QLabel(
             "<span style='font-size:16px; font-weight:900;'>COMMAND CENTRE</span><br>"
-            "<span style='font-size:11px; font-weight:600; color:#a9bac7;'>One system, one mission</span>"
+            "<span style='font-size:11px; font-weight:600; color:#a9bac7;'>One system. One mission.</span><br>"
+            f"<span style='font-size:10px; color:#6f899b;'>Version {APP_VERSION}</span>"
         )
         self.brand_text.setObjectName("brandText")
         layout.addWidget(logo)
         layout.addWidget(self.brand_text, 1)
         return frame
 
+    def status_widget(self):
+        frame = QFrame()
+        frame.setObjectName("sidebarStatus")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setSpacing(5)
+        self.sidebar_health = QLabel("●  Checking")
+        self.sidebar_health.setObjectName("sidebarHealth")
+        self.sidebar_battery = QLabel("Battery    —")
+        self.sidebar_vpn = QLabel("VPN        Checking")
+        self.sidebar_updates = QLabel("Updates    —")
+        for label in (self.sidebar_health, self.sidebar_battery, self.sidebar_vpn, self.sidebar_updates):
+            layout.addWidget(label)
+        return frame
+
     def toggle_sidebar(self):
         self.sidebar_collapsed = not self.sidebar_collapsed
         collapsed = self.sidebar_collapsed
-        self.sidebar_widget.setFixedWidth(76 if collapsed else 292)
+        self.sidebar_widget.setFixedWidth(70 if collapsed else 307)
         self.brand_text.setVisible(not collapsed)
-        self.sidebar_toggle.setText("≫" if collapsed else "≪")
+        self.sidebar_status.setVisible(not collapsed)
+        for label in self.sidebar_widget.findChildren(QLabel, "sidebarSection"):
+            label.setVisible(not collapsed)
+        self.sidebar_toggle.setText("›" if collapsed else "‹")
         self.sidebar_toggle.setToolTip(("Expand" if collapsed else "Collapse") + " sidebar (Ctrl+B)")
-        for module_id, button in self.nav_buttons.items():
-            icon, title = self.nav_titles[module_id]
-            button.setText(icon if collapsed else f"{icon}  {title}")
-            button.setToolTip(title if collapsed else "")
+        for button in self.nav_buttons.values():
+            button.set_collapsed(collapsed)
+        self.position_sidebar_toggle()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.position_sidebar_toggle()
+
+    def position_sidebar_toggle(self):
+        if hasattr(self, "sidebar_toggle"):
+            x = self.sidebar_widget.width() - self.sidebar_toggle.width() // 2
+            y = max(12, self.centralWidget().height() - 54)
+            self.sidebar_toggle.move(x, y)
+            self.sidebar_toggle.raise_()
 
     def open_module(self, module_id):
         geometry = self.geometry()
@@ -7374,10 +9211,24 @@ class MainWindow(QMainWindow):
         system["activity"] = self.recent_activity(telemetry)
         self.telemetry = telemetry
         self.system = system
+        self.update_sidebar_status()
         self.pages["dashboard"].refresh(self.telemetry, self.system)
         control_page = self.pages.get("control")
         if control_page and self.stack.currentWidget() is control_page:
             control_page.refresh()
+
+    def update_sidebar_status(self):
+        healthy = self.system.get("failed", 0) == 0
+        self.sidebar_health.setText("●  Healthy" if healthy else "●  Attention required")
+        self.sidebar_health.setProperty("state", "healthy" if healthy else "warning")
+        self.sidebar_health.style().unpolish(self.sidebar_health)
+        self.sidebar_health.style().polish(self.sidebar_health)
+        battery = self.telemetry.get("battery_percent", "—")
+        self.sidebar_battery.setText(f"Battery    {battery}%" if str(battery) not in ("—", "--", "") else "Battery    —")
+        vpn = str(self.telemetry.get("vpn_status", "Unknown"))
+        self.sidebar_vpn.setText(f"VPN        {vpn.title()}")
+        updates = self.system.get("updates")
+        self.sidebar_updates.setText(f"Updates    {updates if updates is not None else '—'}")
 
     def record_dashboard_transitions(self, telemetry, system):
         current = {
@@ -7688,27 +9539,44 @@ def main():
         app.setDesktopFileName("command-centre")
     if LOGO_FILE.exists():
         app.setWindowIcon(QIcon(str(LOGO_FILE)))
+    splash = None
+    if SPLASH_FILE.is_file():
+        splash_pixmap = QPixmap(str(SPLASH_FILE))
+        if not splash_pixmap.isNull():
+            splash_pixmap = splash_pixmap.scaled(
+                1200,
+                800,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            splash = QSplashScreen(splash_pixmap)
+            splash.show()
+            app.processEvents()
     app.setStyleSheet(
         """
         QWidget {
-            background: #05080c;
-            color: #edf5fb;
+            background: #030910;
+            color: #e9f3fb;
             font-family: Segoe UI, Inter, sans-serif;
             font-size: 13px;
             selection-background-color: #1677b9;
             selection-color: #ffffff;
         }
+        QLabel {
+            background: transparent;
+            border: 0;
+        }
         #appRoot {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #020407, stop:0.58 #081018, stop:1 #020304);
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #02070c, stop:0.58 #06111a, stop:1 #010509);
         }
         #sidebar {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #090d12, stop:0.45 #101822, stop:1 #05070a);
-            border-right: 1px solid #203245;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #07131d, stop:0.52 #05101a, stop:1 #020a11);
+            border-right: 1px solid #16415d;
         }
         #brand {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #101820, stop:0.55 #0b1118, stop:1 #07111a);
-            border: 1px solid #284057;
-            border-radius: 8px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #091925, stop:0.55 #06111a, stop:1 #03101a);
+            border: 1px solid #135077;
+            border-radius: 9px;
         }
         #brandLogo {
             background: #070b10;
@@ -7721,10 +9589,45 @@ def main():
             font-weight: 900;
             letter-spacing: 1px;
         }
+        #sidebarSection {
+            color: #5f8298;
+            font-size: 10px;
+            font-weight: 900;
+            letter-spacing: 2px;
+            padding: 12px 10px 4px 10px;
+        }
+        #sidebarStatus {
+            background: rgba(5, 17, 26, 190);
+            border: 0;
+            border-top: 1px solid #16415d;
+            border-bottom: 1px solid #102f43;
+            margin: 10px 8px 4px 8px;
+        }
+        #sidebarStatus QLabel {
+            color: #91a8b8;
+            font-size: 11px;
+            font-weight: 650;
+        }
+        #sidebarHealth[state="healthy"] { color: #45dc79; font-weight: 800; }
+        #sidebarHealth[state="warning"] { color: #f5b83d; font-weight: 800; }
+        #sidebarToggle {
+            background: #0d2637;
+            border: 1px solid #2789ba;
+            border-radius: 16px;
+            color: #dff7ff;
+            font-size: 22px;
+            font-weight: 700;
+            padding: 0;
+        }
+        #sidebarToggle:hover {
+            background: #16415d;
+            border-color: #35cfff;
+            color: #ffffff;
+        }
         #hero {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #101823, stop:0.55 #080d13, stop:1 #020406);
-            border: 1px solid #284963;
-            border-radius: 8px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #071722, stop:0.55 #03101a, stop:1 #02090f);
+            border: 1px solid #15577f;
+            border-radius: 10px;
         }
         #heroLogo {
             background: #020406;
@@ -7733,21 +9636,21 @@ def main():
         }
         #heroEyebrow {
             color: #4abfff;
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 900;
             letter-spacing: 3px;
         }
         #heroTitle {
             color: #f6f9fb;
-            font-size: 34px;
+            font-size: 42px;
             font-weight: 900;
-            letter-spacing: 5px;
+            letter-spacing: 3px;
         }
         #heroSubtitle {
-            color: #55bdff;
-            font-size: 13px;
+            color: #00AEEF;
+            font-size: 12px;
             font-weight: 800;
-            letter-spacing: 6px;
+            letter-spacing: 8px;
         }
         #healthHeader {
             background: rgba(3, 8, 14, 178);
@@ -7759,35 +9662,295 @@ def main():
             color: #dff5ff;
             letter-spacing: 1px;
         }
+        #heroStatus {
+            background: transparent;
+            border: 0;
+            border-top: 1px solid #123b56;
+            padding: 8px 0 1px 0;
+            color: #d4e5f2;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+        #softwareHeader {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0B1520, stop:1 #071019);
+            border: 1px solid #16415D;
+            border-radius: 11px;
+        }
+        #softwarePageTitle {
+            color: #F2F6FA;
+            font-size: 17px;
+            font-weight: 800;
+            letter-spacing: 2px;
+        }
+        #softwareSubtitle {
+            color: #28C8FF;
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 3px;
+        }
+        #softwareAttention {
+            color: #B4C3CE;
+            font-size: 12px;
+            font-weight: 800;
+            padding: 2px 0;
+        }
+        #softwareAttention[state="success"] { color: #35D66B; }
+        #softwareAttention[state="warning"] { color: #FFD166; font-size: 13px; font-weight: 900; }
+        #softwareAttention[state="critical"] { color: #F05B5B; }
+        #softwareStatusChip {
+            background: #09131D;
+            border: 1px solid #153044;
+            border-radius: 7px;
+            min-width: 92px;
+            padding: 4px 7px;
+            color: #A3B1BD;
+            font-size: 11px;
+            font-weight: 800;
+        }
+        #softwareStatusChip[state="success"] { color: #35D66B; border-color: #205C3A; }
+        #softwareStatusChip[state="warning"] { color: #F5B83D; border-color: #614B20; }
+        #softwareStatusChip[state="critical"] { color: #F05B5B; border-color: #6B2929; }
+        #softwareStatusChip[state="info"] { color: #28C8FF; border-color: #164B67; }
+        #softwareTabs::pane { border: 1px solid #153044; border-radius: 9px; background: #071019; }
+        #softwareTabs QTabBar::tab { min-height: 26px; padding: 7px 14px; background: #09131D; font-size: 12px; }
+        #softwareTabs QTabBar::tab:selected { background: #0E1A26; color: #FFFFFF; border-color: #16B9F3; border-bottom: 2px solid #28C8FF; }
+        #softwareTabs QTabBar::tab:hover { background: #122535; color: #FFFFFF; }
+        #softwareSubPage { background: transparent; }
+        #softwareSectionHeader {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0D1C28, stop:1 #08121B);
+            border: 1px solid #1A4A67;
+            border-radius: 10px;
+        }
+        #softwareSectionIcon {
+            color: #2BC4FF;
+            background: #0B2231;
+            border: 1px solid #1C5877;
+            border-radius: 8px;
+            font-size: 22px;
+            font-weight: 900;
+        }
+        #softwareSectionTitle { color: #F2F6FA; font-size: 18px; font-weight: 900; letter-spacing: 2px; }
+        #softwareSectionSubtitle { color: #2BC4FF; font-size: 10px; font-weight: 800; letter-spacing: 3px; }
+        #softwareSubPageCard {
+            background: #08111A;
+            border: 1px solid #183D56;
+            border-radius: 12px;
+        }
+        #softwareStatusBlock {
+            background: #091722;
+            border: 1px solid #173C54;
+            border-radius: 7px;
+            padding: 9px 11px;
+            color: #C8D5DE;
+            font-size: 12px;
+            font-weight: 650;
+        }
+        #softwareSearch, #softwareCombo {
+            background: #071019;
+            border: 1px solid #1A4A67;
+            border-radius: 7px;
+            padding: 9px 11px;
+            color: #EAF3F8;
+            font-size: 12px;
+        }
+        #softwareSearch:focus, #softwareCombo:hover { border-color: #2BC4FF; background: #0B1A26; }
+        QListWidget#softwareList {
+            background: #060C12;
+            border: 1px solid #17384D;
+            border-radius: 8px;
+            color: #D8E4EC;
+            font-size: 12px;
+            outline: 0;
+        }
+        QListWidget#softwareList::item { padding: 11px 12px; border-bottom: 1px solid #152C3C; }
+        QListWidget#softwareList::item:hover { background: #0D2130; border-left: 3px solid #2BC4FF; }
+        QListWidget#softwareList::item:selected { background: #12334A; color: #FFFFFF; border-left: 3px solid #35CFFF; }
+        #softwareSectionButton, #softwarePrimaryAction {
+            min-height: 22px;
+            padding: 7px 12px;
+            border: 1px solid #28516C;
+            border-radius: 7px;
+            color: #E2EDF4;
+            font-size: 11px;
+            font-weight: 800;
+        }
+        #softwareSectionButton { background: #0C1B27; }
+        #softwarePrimaryAction { background: #0D3B57; border-color: #2BC4FF; color: #FFFFFF; }
+        #softwareSectionButton:hover, #softwarePrimaryAction:hover { background: #15354A; border-color: #35CFFF; }
+        #softwareMetricCard {
+            background: #0B1520;
+            border: 1px solid #16415D;
+            border-radius: 11px;
+            min-height: 112px;
+        }
+        #softwareMetricCard[accent="#F5B83D"] { border-top: 2px solid #F5B83D; }
+        #softwareMetricCard[accent="#35D66B"] { border-top: 2px solid #35D66B; }
+        #softwareMetricCard[accent="#16B9F3"] { border-top: 2px solid #16B9F3; }
+        #softwareMetricCard[accent="#F0A72B"] { border-top: 2px solid #F0A72B; }
+        #softwareMetricCard[accent="#A65DFF"] { border-top: 2px solid #A65DFF; }
+        #softwareMetricIcon {
+            color: #28C8FF;
+            background: #0D2130;
+            border: 1px solid #16415D;
+            border-radius: 7px;
+            font-size: 25px;
+            font-weight: 800;
+        }
+        #softwareMetricTitle { color: #B1C0CA; font-size: 12px; font-weight: 800; letter-spacing: 1px; }
+        #softwareMetricValue { color: #F2F6FA; font-size: 34px; font-weight: 900; }
+        #softwareMetricDetail { color: #91A4B1; font-size: 11px; font-weight: 650; }
+        #softwareChecklist {
+            color: #CAD5DD;
+            font-family: JetBrains Mono, Cascadia Code, monospace;
+            font-size: 12px;
+            line-height: 120%;
+        }
+        #softwareMiniPanel, #impactColumn {
+            background: #09131D;
+            border: 1px solid #153044;
+            border-radius: 8px;
+        }
+        #softwareMiniTitle { color: #28C8FF; font-size: 11px; font-weight: 850; letter-spacing: 1px; }
+        #softwareMiniBody { color: #F1F6FA; font-size: 17px; font-weight: 900; }
+        #softwareMiniDetail { color: #B8C6CF; font-size: 12px; font-weight: 650; }
+        #softwareTrend { color: #FFFFFF; font-size: 10px; font-weight: 750; }
+        #softwareTrend[direction="up"] { color: #42E978; }
+        #softwareTrend[direction="down"] { color: #FFBF32; }
+        #softwareIntelBadge {
+            background: #102334;
+            border: 1px solid #1C4D69;
+            border-radius: 5px;
+            padding: 2px 5px;
+            color: #28C8FF;
+            font-size: 9px;
+            font-weight: 850;
+        }
+        #softwareIntelBadge[state="success"] { color: #35D66B; background: #10271B; border-color: #275D3B; }
+        #softwareIntelBadge[state="warning"] { color: #F5B83D; background: #2B2312; border-color: #66501F; }
+        #softwareIntelBadge[state="critical"] { color: #F05B5B; background: #2C171A; border-color: #652D34; }
+        #softwareActionButton {
+            background: #0D1A25;
+            border: 1px solid #1A425C;
+            border-radius: 7px;
+            padding: 5px 8px;
+            color: #DCE7EF;
+            font-size: 11px;
+            font-weight: 750;
+            min-height: 18px;
+        }
+        #softwareActionButton:hover { background: #122535; border-color: #28C8FF; }
+        #softwareFooterButton { min-height: 26px; max-height: 28px; font-size: 11px; }
+        #softwareImpactValue { color: #F2F6FA; font-size: 26px; font-weight: 900; }
+        #impactIndicator { color: #1B2B36; font-size: 20px; font-weight: 900; letter-spacing: 0px; }
+        #impactIndicator[impact="low"][active="true"] { color: #35D66B; }
+        #impactIndicator[impact="medium"][active="true"] { color: #F5B83D; }
+        #impactIndicator[impact="high"][active="true"] { color: #F05B5B; }
+        #impactStatus { color: #8396A3; font-size: 10px; font-weight: 750; letter-spacing: 1px; }
+        QProgressBar#impactBar { background: #101A24; border: 0; border-radius: 4px; min-height: 9px; max-height: 9px; }
+        QProgressBar#impactBar::chunk { background: #16B9F3; border-radius: 4px; }
+        QProgressBar#impactBar[impact="low"]::chunk { background: #35D66B; }
+        QProgressBar#impactBar[impact="medium"]::chunk { background: #F5B83D; }
+        QProgressBar#impactBar[impact="high"]::chunk { background: #F05B5B; }
+        #softwareNote { color: #91A4B1; font-size: 11px; }
+        #protectionIcon { color: #28C8FF; font-size: 38px; font-weight: 800; }
+        #protectionExplanation { color: #C2CDD5; font-size: 11px; font-weight: 650; }
+        #protectionDivider { color: #1A4058; background: #1A4058; min-width: 1px; max-width: 1px; }
+        #softwareActivityRow {
+            background: #09131D;
+            border: 1px solid #153044;
+            border-left: 3px solid #16B9F3;
+            border-radius: 6px;
+        }
+        #softwareActivityTime { color: #98AAB7; font-size: 12px; font-family: JetBrains Mono, monospace; min-width: 58px; max-width: 58px; }
+        #softwareActivityCategory { color: #16B9F3; font-size: 11px; font-weight: 850; min-width: 82px; max-width: 82px; }
+        #softwareActivityCategory[category="install"] { color: #35D66B; }
+        #softwareActivityCategory[category="remove"] { color: #F0A72B; }
+        #softwareActivityCategory[category="snapshot"] { color: #A65DFF; }
+        #softwareActivityDescription { color: #E5EDF3; font-size: 12px; font-weight: 650; }
+        #softwareActionTile {
+            background: #0D1A25;
+            border: 1px solid #1A425C;
+            border-radius: 8px;
+            min-height: 82px;
+            padding: 9px 10px;
+            color: #DCE7EF;
+            font-size: 12px;
+            font-weight: 750;
+        }
+        #softwareActionTile[category="update"] { background: #0C1822; border-color: #17445D; }
+        #softwareActionTile[category="health"] { background: #0C1916; border-color: #20553A; }
+        #softwareActionTile[category="cleanup"] { background: #19160F; border-color: #57441E; }
+        #softwareActionTile[category="system"] { background: #121521; border-color: #443064; }
+        #softwareActionTile[hierarchy="primary"] { background: #0D4665; border: 2px solid #2BC4FF; color: #FFFFFF; }
+        #softwareActionTile[hierarchy="danger"] { background: #1B1710; border: 1px solid #D99A28; color: #FFD079; }
+        #softwareActionTile:hover { background: #153044; border: 2px solid #35CFFF; color: #FFFFFF; }
+        #softwareActionTile:pressed { background: #0D2E45; }
+        #missionChip {
+            background: rgba(7, 10, 14, 150);
+            border: 1px solid #16344D;
+            border-radius: 8px;
+            min-width: 112px;
+            padding: 5px 8px;
+            color: #B5BDC6;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+        #missionChip[state="success"] { color: #35D66B; border-color: #205C3A; }
+        #missionChip[state="warning"] { color: #F4B942; border-color: #614B20; }
+        #missionChip[state="critical"] { color: #FF4B4B; border-color: #6B2929; }
+        #missionChip[state="info"] { color: #2BC4FF; border-color: #164B67; }
         #navButton {
             text-align: left;
-            min-height: 40px;
-            padding: 9px 11px;
+            min-height: 38px;
+            padding: 8px 11px;
             border: 1px solid transparent;
-            border-radius: 7px;
+            border-radius: 8px;
             background: transparent;
             color: #b9c8d5;
             font-weight: 700;
         }
         #navButton:hover {
-            background: #121c27;
-            border-color: #2b4d68;
+            background: #0a2030;
+            border-color: #1b5579;
             color: #edf8ff;
         }
         #navButton:checked {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #16334a, stop:1 #0d1823);
-            border-color: #1e9be8;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0d3f63, stop:0.72 #08283d, stop:1 #061724);
+            border-color: #13aef8;
             color: #ffffff;
         }
         #card, QFrame#card {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #101821, stop:1 #090e14);
-            border: 1px solid #25394a;
-            border-radius: 8px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #101822, stop:0.58 #0B141D, stop:1 #091018);
+            border: 1px solid #183d56;
+            border-radius: 14px;
         }
+        #card:hover, QFrame#card:hover {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #152131, stop:1 #0D1823);
+            border-color: #2976A3;
+        }
+        QFrame#card[accent="#00AEEF"] { border-left: 2px solid #00AEEF; }
+        QFrame#card[accent="#35D66B"] { border-left: 2px solid #35D66B; }
+        QFrame#card[accent="#A55DFF"] { border-left: 2px solid #A55DFF; }
+        QFrame#card[accent="#F0B230"] { border-left: 2px solid #F0B230; }
         #alertRow, QFrame#alertRow {
-            background: #0b131b;
+            background: #0B1017;
             border: 1px solid #30465a;
-            border-radius: 6px;
+            border-radius: 8px;
+            padding: 2px;
+        }
+        QFrame#alertRow[severity="warning"] { border-left: 6px solid #F4B942; }
+        QFrame#alertRow[severity="critical"] { border-left: 6px solid #FF4B4B; }
+        QFrame#alertRow[severity="advisory"] { border-left: 6px solid #00AEEF; }
+        #alertText { color: #DCE6EE; font-size: 12px; font-weight: 650; }
+        #alertAction {
+            min-height: 20px;
+            max-height: 22px;
+            padding: 1px 8px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: 800;
         }
         #queueBar, QFrame#queueBar {
             background: #102131;
@@ -7848,19 +10011,77 @@ def main():
             border: 1px solid #223344;
             border-radius: 7px;
         }
+        #toolStatCard { background: #091722; border: 1px solid #173D55; border-radius: 8px; }
+        #toolStatValue { color: #FFFFFF; font-size: 22px; font-weight: 900; }
+        #toolStatLabel { color: #7F98A9; font-size: 9px; font-weight: 850; letter-spacing: 1px; }
+        #toolFilterLabel { color: #6F899B; font-size: 10px; font-weight: 850; letter-spacing: 1px; }
+        #toolFilterChip {
+            min-height: 22px; max-height: 24px; padding: 1px 10px;
+            background: #091722; border: 1px solid #1B455F; border-radius: 12px;
+            color: #AFC0CB; font-size: 10px; font-weight: 750;
+        }
+        #toolFilterChip:checked { background: #104464; border-color: #2BC4FF; color: #FFFFFF; }
+        #toolRecommendedStrip {
+            background: #101B29; border: 1px solid #433063; border-left: 3px solid #A65DFF;
+            border-radius: 7px; padding: 8px 10px; color: #DCC9FF; font-size: 11px; font-weight: 750;
+        }
+        QListWidget#toolCategories { background: #060D14; border: 1px solid #17384D; border-radius: 8px; outline: 0; }
+        QListWidget#toolCategories::item { padding: 7px 10px; margin: 2px 3px; border: 1px solid transparent; border-radius: 7px; color: #AFC0CB; }
+        QListWidget#toolCategories::item:hover { background: #0D2130; border-color: #1B4A66; color: #FFFFFF; }
+        QListWidget#toolCategories::item:selected { background: #12334A; border-left: 3px solid #2BC4FF; color: #FFFFFF; }
+        QListWidget#toolAppList { background: #050B11; border: 1px solid #17384D; border-radius: 8px; outline: 0; }
+        #toolActionButton { min-height: 28px; padding: 5px 9px; font-size: 11px; font-weight: 800; }
+        QProgressBar#toolInstallProgress { min-height: 8px; max-height: 8px; border: 0; border-radius: 4px; background: #101A24; }
+        QProgressBar#toolInstallProgress::chunk { background: #2BC4FF; border-radius: 4px; }
+        #offlineTabs::pane { border: 1px solid #17384D; border-radius: 9px; background: #071019; }
+        #offlineTabs QTabBar::tab { min-height: 28px; padding: 7px 18px; background: #09131D; color: #91A5B3; font-weight: 750; }
+        #offlineTabs QTabBar::tab:selected { background: #12334A; color: #FFFFFF; border-bottom: 3px solid #2BC4FF; }
+        #offlineTabs QTabBar::tab:hover { background: #102535; color: #FFFFFF; }
+        #knowledgeStatCard { background: #091722; border: 1px solid #173D55; border-radius: 9px; }
+        #knowledgeStatIcon { color: #2BC4FF; font-size: 18px; font-weight: 850; }
+        #knowledgeStatValue { color: #FFFFFF; font-size: 22px; font-weight: 900; }
+        #knowledgeStatLabel { color: #8198A8; font-size: 9px; font-weight: 850; letter-spacing: 1px; }
+        #knowledgeStatContext { color: #627D8F; font-size: 9px; font-weight: 650; }
+        #knowledgeMuted { color: #8FA5B4; font-size: 11px; }
+        #knowledgeFilterLabel { color: #6F899B; font-size: 10px; font-weight: 850; letter-spacing: 1px; }
+        #knowledgeFilterChip { min-height: 22px; max-height: 24px; padding: 1px 10px; background: #091722; border: 1px solid #1B455F; border-radius: 12px; color: #AFC0CB; font-size: 10px; font-weight: 750; }
+        #knowledgeFilterChip:checked { background: #17658F; border: 2px solid #35D5FF; color: #FFFFFF; font-weight: 850; }
+        #knowledgeMiniTitle { color: #77CFF3; font-size: 9px; font-weight: 850; letter-spacing: 1px; }
+        #knowledgeSuggestion { min-height: 24px; padding: 3px 7px; background: #0B1A26; border: 1px solid #1B455F; border-radius: 6px; color: #C3D3DD; text-align: left; font-size: 10px; }
+        #knowledgeSuggestion:hover { background: #12334A; border-color: #2BC4FF; color: #FFFFFF; }
+        #knowledgeRecentQuestions { color: #C7D6DF; font-size: 10px; padding-top: 4px; border-top: 1px solid #17384D; }
+        #knowledgeFeatureText { color: #DCE7EE; font-size: 12px; padding: 5px; }
+        #knowledgeCategories { color: #C8D5DE; font-size: 12px; padding: 6px; line-height: 140%; }
+        #knowledgeSources { color: #7791A2; font-size: 9px; font-weight: 750; padding-top: 5px; border-top: 1px solid #17384D; }
+        #knowledgePrimaryButton { background: #0D4665; border: 1px solid #2BC4FF; color: #FFFFFF; font-weight: 850; }
+        #knowledgeSecondaryButton { background: #0B1822; border: 1px solid #28516C; color: #C9D7E0; }
+        #knowledgeActionButton { min-height: 68px; padding: 6px 10px; background: #0B1822; border: 1px solid #24516D; border-radius: 8px; color: #D8E7EF; font-size: 11px; font-weight: 850; }
+        #knowledgeActionButton:hover { background: #12334A; border-color: #2BC4FF; color: #FFFFFF; }
+        #knowledgeCover { background: #0B2231; border: 1px solid #1C5877; border-radius: 9px; font-size: 38px; }
+        QProgressBar#readingProgress { min-height: 16px; max-height: 16px; background: #101A24; border: 0; border-radius: 7px; color: #FFFFFF; font-size: 9px; font-weight: 800; text-align: center; }
+        QProgressBar#readingProgress::chunk { background: #2BC4FF; border-radius: 7px; }
+        QListWidget#knowledgeShelf { background: #060D14; border: 1px solid #17384D; border-radius: 7px; outline: 0; }
+        QListWidget#knowledgeShelf::item { padding: 5px 8px; border-bottom: 1px solid #152C3C; color: #D8E4EC; }
+        QListWidget#knowledgeShelf::item:hover, QListWidget#knowledgeShelf::item:selected { background: #102A3C; color: #FFFFFF; }
+        QProgressBar#knowledgeStorageBar { min-height: 11px; max-height: 11px; border: 0; border-radius: 5px; background: #101A24; }
+        QProgressBar#knowledgeStorageBar::chunk { background: #2BC4FF; border-radius: 5px; }
+        QProgressBar#knowledgeStorageBar[role="index"]::chunk { background: #A65DFF; }
+        QProgressBar#knowledgeStorageBar[role="free"]::chunk { background: #42E978; }
+        #knowledgeStorageLabel { color: #8298A8; font-size: 9px; font-weight: 800; letter-spacing: 1px; }
+        #knowledgeStorageValue { color: #FFFFFF; font-size: 10px; font-weight: 800; }
         #metricValue {
             color: #ffffff;
-            font-size: 29px;
+            font-size: 34px;
             font-weight: 900;
             letter-spacing: 1px;
         }
         #muted {
-            color: #97a9b8;
+            color: #a8bac8;
         }
         #panelTitle {
             color: #f2f6fa;
-            font-size: 15px;
-            font-weight: 900;
+            font-size: 18px;
+            font-weight: 700;
             letter-spacing: 1px;
         }
         #bar {
@@ -7869,6 +10090,31 @@ def main():
             border-radius: 4px;
             min-height: 8px;
             max-height: 8px;
+        }
+        QProgressBar#metricBar {
+            background: #101A24;
+            border: 0;
+            border-radius: 3px;
+            min-height: 7px;
+            max-height: 7px;
+        }
+        QProgressBar#metricBar::chunk { background: #00AEEF; border-radius: 3px; }
+        QProgressBar#metricBar[accent="#35D66B"]::chunk { background: #35D66B; }
+        QProgressBar#metricBar[accent="#A55DFF"]::chunk { background: #A55DFF; }
+        QProgressBar#metricBar[accent="#F0B230"]::chunk { background: #F0B230; }
+        #activityRow {
+            background: #0B1017;
+            border: 1px solid #16344D;
+            border-left: 2px solid #00AEEF;
+            border-radius: 7px;
+        }
+        #activityTime { color: #9AAAB7; font-family: JetBrains Mono, monospace; font-size: 12px; min-width: 48px; }
+        #activityCategory { color: #2BC4FF; font-size: 11px; font-weight: 800; min-width: 64px; }
+        #activityMessage { color: #DCE6EE; font-weight: 650; }
+        #readinessDetail {
+            color: #B9C5CE;
+            font-family: JetBrains Mono, Cascadia Code, monospace;
+            font-size: 12px;
         }
         #textPanel {
             background: #05080c;
@@ -7914,6 +10160,20 @@ def main():
         #primaryButton:hover {
             background: #1688cb;
         }
+        #quickActionButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #101E2B, stop:1 #09131D);
+            border: 1px solid #204661;
+            border-radius: 10px;
+            color: #DCEAF4;
+            font-size: 13px;
+            font-weight: 800;
+            padding: 10px;
+        }
+        #quickActionButton:hover {
+            background: #102C40;
+            border-color: #2BC4FF;
+            color: #FFFFFF;
+        }
         #attachButton {
             min-width: 38px;
             max-width: 38px;
@@ -7929,10 +10189,10 @@ def main():
             border-color: #55bdff;
         }
         QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1b2734, stop:1 #0e151d);
-            border: 1px solid #3a5368;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #102536, stop:1 #081520);
+            border: 1px solid #28516c;
             border-radius: 7px;
-            padding: 8px 11px;
+            padding: 7px 10px;
             color: #e7f3fb;
             font-weight: 750;
         }
@@ -8023,6 +10283,8 @@ def main():
     if primary_screen:
         window.setGeometry(primary_screen.availableGeometry())
     window.showMaximized()
+    if splash is not None:
+        splash.finish(window)
     sys.exit(app.exec())
 
 

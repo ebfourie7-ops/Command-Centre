@@ -1,5 +1,5 @@
 pkgname=command-centre
-pkgver=1.0.2
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="CommandOS operations dashboard and Command Intel investigation workspace"
 arch=('any')
@@ -12,10 +12,14 @@ sha256sums=()
 
 package() {
   install -d "$pkgdir/opt/command-centre" "$pkgdir/usr/bin" "$pkgdir/usr/share/applications"
-  cp -a "$startdir/../../command_centre.py" "$startdir/../../command_intel.py" "$startdir/../../core" "$startdir/../../deployments" "$startdir/../../resources" "$startdir/../../tools" "$pkgdir/opt/command-centre/"
-  install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/opt/command-centre/logo.png"
-  install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/command-centre.png"
-  install -Dm644 "$startdir/../../ChatGPT Image Jul 9, 2026, 09_59_59 PM.png" "$pkgdir/usr/share/pixmaps/command-centre.png"
+  cp -a "$startdir/../../command_centre.py" "$startdir/../../command_intel.py" "$startdir/../../splash.png" "$startdir/../../core" "$startdir/../../resources" "$startdir/../../tools" "$pkgdir/opt/command-centre/"
+  install -d "$pkgdir/opt/command-centre/inventory"
+  install -m644 "$startdir/../../inventory/flatpak-apps-20260709-195938.txt" "$startdir/../../inventory/pacman-explicit-20260709-195938.txt" "$startdir/../../inventory/pacman-foreign-aur-20260709-195938.txt" "$pkgdir/opt/command-centre/inventory/"
+  find "$pkgdir/opt/command-centre" -type d -name __pycache__ -prune -exec rm -rf {} +
+  install -Dm644 "$startdir/../../deployments/default_deployments.json" "$pkgdir/opt/command-centre/deployments/default_deployments.json"
+  install -Dm644 "$startdir/../../command-centre-icon.png" "$pkgdir/opt/command-centre/logo.png"
+  install -Dm644 "$startdir/../../command-centre-icon.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/command-centre.png"
+  install -Dm644 "$startdir/../../command-centre-icon.png" "$pkgdir/usr/share/pixmaps/command-centre.png"
   printf '#!/bin/sh\nexec python /opt/command-centre/command_centre.py "$@"\n' > "$pkgdir/usr/bin/command-centre"
   chmod 755 "$pkgdir/usr/bin/command-centre"
   install -Dm644 "$startdir/command-centre.desktop" "$pkgdir/usr/share/applications/command-centre.desktop"

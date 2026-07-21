@@ -1,11 +1,11 @@
 {
   "KPackageStructure": "Plasma/Applet",
   "KPlugin": {
-    "Name": "Telemetry Widget",
-    "Description": "Shows simple CPU and memory telemetry",
+    "Name": "Command Widget",
+    "Description": "Configurable system telemetry for CPU, graphics, storage, cooling, network, and power",
     "Icon": "utilities-system-monitor",
     "Id": "telemetrywidget",
-    "Version": "1.0",
+    "Version": "1.1.0",
     "License": "MIT",
     "Category": "Utilities",
     "Authors": [
